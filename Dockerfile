@@ -1,10 +1,10 @@
-# Use a lightweight Python base image
-FROM python:3.10-slim
+# Use Debian Bullseye (Contains FFmpeg 4.3 which is compatible with PyAV)
+FROM python:3.10-slim-bullseye
 
 # Set working directory
 WORKDIR /app
 
-# Install FFmpeg, Build Tools, and FFmpeg Development Headers required to compile PyAV
+# Install FFmpeg and the exact development tools needed for Python to compile AV
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ffmpeg \
