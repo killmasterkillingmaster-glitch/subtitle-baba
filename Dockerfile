@@ -1,37 +1,29 @@
-# Base image
-FROM python:3.10-slim
+# SLIM image use NAHI karni hai. Full image pre-compiled wheels ko support karti hai.
+FROM python:3.10
 
-# System dependencies (IMPORTANT for av + ffmpeg)
+# Sirf FFmpeg CLI tool chahiye, koi C-compilation libraries (gcc, dev) nahi.
 RUN apt-get update && apt-get install -y \
     ffmpeg \
-    gcc \
-    g++ \
-    build-essential \
-    pkg-config \
-    libavformat-dev \
-    libavcodec-dev \
-    libavdevice-dev \
-    libavutil-dev \
-    libavfilter-dev \
-    libswscale-dev \
-    libswresample-dev \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Working directory
+# Set working directory
 WORKDIR /app
 
-# Copy requirements first (cache optimization)
+# Copy requirements file first
 COPY requirements.txt .
 
-# Upgrade pip (important)
-RUN pip install --upgrade pip
+# Pip upgrade karein
+RUN pip install --no-cache-dir --upgrade pip
 
-# Install Python dependencies
+# Dependencies install karein (Ab yeh compile nahi karega, direct binary download karega!)
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy all files
+# Baaki saare files copy karein
 COPY . .
 
-# Start command
+# Render ke liye port expose karein
+EXPOSE 8080
+
+# Bot start command
 CMD ["python", "main.py"]
