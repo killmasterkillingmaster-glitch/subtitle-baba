@@ -1,15 +1,13 @@
-# Use Debian Bullseye (Contains FFmpeg 4.3 which is compatible with PyAV)
-FROM python:3.10-slim-bullseye
+# Base image
+FROM python:3.10-slim
 
-# Set working directory
-WORKDIR /app
-
-# Install FFmpeg and the exact development tools needed for Python to compile AV
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
+# System dependencies (IMPORTANT for av + ffmpeg)
+RUN apt-get update && apt-get install -y \
     ffmpeg \
-    pkg-config \
+    gcc \
+    g++ \
     build-essential \
+    pkg-config \
     libavformat-dev \
     libavcodec-dev \
     libavdevice-dev \
@@ -17,23 +15,23 @@ RUN apt-get update && \
     libavfilter-dev \
     libswscale-dev \
     libswresample-dev \
-    && apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy the requirements file
+# Working directory
+WORKDIR /app
+
+# Copy requirements first (cache optimization)
 COPY requirements.txt .
 
-# Upgrade pip and install build tools
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+# Upgrade pip (important)
+RUN pip install --upgrade pip
 
-# Now install the Python dependencies
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the bot script
-COPY main.py .
+# Copy all files
+COPY . .
 
-# Expose port for Render web service binding
-EXPOSE 8080
-
-# Command to run the bot
+# Start command
 CMD ["python", "main.py"]
