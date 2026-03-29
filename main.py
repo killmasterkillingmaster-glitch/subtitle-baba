@@ -3,96 +3,85 @@ import gc
 import logging
 import asyncio
 from collections import deque
-
-# Correct Pyrogram imports
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message
 from pyrogram.enums import ParseMode
-
 from faster_whisper import WhisperModel
 from aiohttp import web
 
 # ================= CONFIG =================
-API_ID = int(os.environ.get("API_ID", "0"))
-API_HASH = os.environ.get("API_HASH", "")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-PORT = int(os.environ.get("PORT", "10000"))
 
-OWNER_ID = int(os.environ.get("OWNER_ID", "5344078567"))
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+PORT = int(os.getenv("PORT", "8080"))
 
-def parse_id_list(env_val, default_list):
-    if not env_val:
-        return default_list
-    return [int(x.strip()) for x in env_val.split(",") if x.strip()]
+if not BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN missing! Set it in Render ENV")
 
-ALLOWED_USERS = parse_id_list(os.environ.get("ALLOWED_USERS", ""), [])
-ALLOWED_GROUPS = parse_id_list(os.environ.get("ALLOWED_GROUPS", ""), [-1003899919015])
+OWNER_ID = int(os.getenv("OWNER_ID", "5344078567"))
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+def parse_ids(value, default):
+    if not value:
+        return default
+    return [int(x.strip()) for x in value.split(",") if x.strip()]
+
+ALLOWED_USERS = parse_ids(os.getenv("ALLOWED_USERS"), [])
+ALLOWED_GROUPS = parse_ids(os.getenv("ALLOWED_GROUPS"), [-1003899919015])
+
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Client("SubGenBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
+# ================= GLOBALS =================
 task_queue = deque()
 model = None
 
 # ================= AUTH =================
-def is_authorized(message: Message) -> bool:
-    if not message.from_user:
-        return False
-    user_id = message.from_user.id
+def is_authorized(message: Message):
+    user_id = message.from_user.id if message.from_user else 0
     chat_id = message.chat.id
 
-    if user_id == OWNER_ID or user_id in ALLOWED_USERS or chat_id in ALLOWED_GROUPS:
-        return True
-    return False
+    return (
+        user_id == OWNER_ID
+        or user_id in ALLOWED_USERS
+        or chat_id in ALLOWED_GROUPS
+    )
 
 # ================= MODEL =================
 def load_model():
     global model
     if model is None:
-        logger.info("Loading Whisper tiny model...")
+        logger.info("Loading Whisper Tiny Model...")
         model = WhisperModel("tiny", device="cpu", compute_type="int8")
-        logger.info("Whisper model loaded successfully")
     return model
 
-# ================= TIME & SUBTITLE FUNCTIONS =================
-def format_time_srt(seconds):
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int((seconds - int(seconds)) * 1000)
-    return f"{h:02}:{m:02}:{s:02},{ms:03}"
+# ================= TIME =================
+def srt_time(s):
+    return f"{int(s//3600):02}:{int((s%3600)//60):02}:{int(s%60):02},{int((s%1)*1000):03}"
 
-def format_time_vtt(seconds):
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int((seconds - int(seconds)) * 1000)
-    return f"{h:02}:{m:02}:{s:02}.{ms:03}"
+def vtt_time(s):
+    return f"{int(s//3600):02}:{int((s%3600)//60):02}:{int(s%60):02}.{int((s%1)*1000):03}"
 
-def generate_subtitle_file(segments, output_file, sub_format):
-    with open(output_file, "w", encoding="utf-8") as f:
-        if sub_format == "vtt":
+# ================= SUB =================
+def generate_sub(segments, file, fmt):
+    with open(file, "w", encoding="utf-8") as f:
+        if fmt == "vtt":
             f.write("WEBVTT\n\n")
-            for segment in segments:
-                start = format_time_vtt(segment.start)
-                end = format_time_vtt(segment.end)
-                f.write(f"{start} --> {end}\n{segment.text.strip()}\n\n")
 
-        elif sub_format == "srt":
-            for i, segment in enumerate(segments, 1):
-                start = format_time_srt(segment.start)
-                end = format_time_srt(segment.end)
-                f.write(f"{i}\n{start} --> {end}\n{segment.text.strip()}\n\n")
+        for i, seg in enumerate(segments, 1):
+            text = seg.text.strip()
+            if not text:
+                continue
 
-        # ASS support bhi rakha hai agar chahiye
+            if fmt == "srt":
+                f.write(f"{i}\n{srt_time(seg.start)} --> {srt_time(seg.end)}\n{text}\n\n")
+            else:
+                f.write(f"{vtt_time(seg.start)} --> {vtt_time(seg.end)}\n{text}\n\n")
 
 # ================= WORKER =================
-async def process_queue():
+async def worker():
     while True:
         if not task_queue:
             await asyncio.sleep(2)
@@ -100,110 +89,91 @@ async def process_queue():
 
         task = task_queue.popleft()
         message = task["message"]
-        sub_format = task["sub_format"]
+        fmt = task["format"]
+
         chat_id = message.chat.id
         msg_id = message.id
 
-        status_msg = await message.reply("⏳ Processing started...")
-        video_file = f"v_{chat_id}_{msg_id}.mp4"
-        audio_file = f"a_{chat_id}_{msg_id}.mp3"
-        sub_file = f"sub_{chat_id}_{msg_id}.{sub_format}"
+        status = await message.reply("⏳ Processing...")
+
+        video = f"v_{chat_id}_{msg_id}.mp4"
+        audio = f"a_{chat_id}_{msg_id}.mp3"
+        sub = f"sub_{chat_id}_{msg_id}.{fmt}"
 
         try:
-            await status_msg.edit("📥 Downloading video...")
-            await app.download_media(message.reply_to_message, file_name=video_file)
+            await app.download_media(message.reply_to_message, file_name=video)
 
-            await status_msg.edit("🎵 Extracting audio...")
+            await status.edit("🎵 Extracting audio...")
+
             proc = await asyncio.create_subprocess_shell(
-                f"ffmpeg -i {video_file} -vn -ar 16000 -ac 1 {audio_file} -y",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                f"ffmpeg -i {video} -vn -ar 16000 -ac 1 {audio} -y",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
             )
-            await proc.communicate()
+            await proc.wait()
 
-            if os.path.exists(video_file):
-                os.remove(video_file)
+            os.remove(video)
 
-            await status_msg.edit("🤖 Transcribing with Whisper...")
-            whisper_model = load_model()
-            segments_gen, info = await asyncio.to_thread(whisper_model.transcribe, audio_file)
-            segments = list(segments_gen)
+            await status.edit("🤖 Transcribing...")
 
-            await status_msg.edit("📝 Generating subtitle...")
-            generate_subtitle_file(segments, sub_file, sub_format)
+            mdl = load_model()
+            seg_gen, _ = await asyncio.to_thread(mdl.transcribe, audio)
+            segments = list(seg_gen)
 
-            await status_msg.edit("⬆️ Uploading subtitle...")
-            await app.send_document(
-                chat_id=chat_id,
-                document=sub_file,
-                caption=f"✅ Subtitle Generated ({sub_format.upper()})",
-                reply_to_message_id=msg_id
-            )
-            await status_msg.delete()
+            generate_sub(segments, sub, fmt)
+
+            await status.edit("⬆️ Uploading...")
+
+            await app.send_document(chat_id, sub, reply_to_message_id=msg_id)
+
+            await status.delete()
 
         except Exception as e:
-            logger.error(f"Processing error: {e}", exc_info=True)
-            try:
-                await status_msg.edit("❌ Error occurred while processing.")
-            except:
-                pass
+            logger.error(e)
+            await status.edit("❌ Error")
+
         finally:
-            for f in [video_file, audio_file, sub_file]:
+            for f in [video, audio, sub]:
                 if os.path.exists(f):
-                    try:
-                        os.remove(f)
-                    except:
-                        pass
+                    os.remove(f)
             gc.collect()
 
 # ================= COMMANDS =================
 @app.on_message(filters.command("start"))
-async def start_cmd(client, message):
-    if not is_authorized(message):
-        await message.reply("❌ You are not authorized to use this bot.")
-        return
-    await message.reply(
-        "✅ **Subtitle Baba Bot is Online**\n\n"
-        "Reply to a video with `/srt`, `/vtt` or `/ass`",
-        parse_mode=ParseMode.MARKDOWN
-    )
+async def start(client, message):
+    await message.reply("✅ Bot Working!\nReply video with /srt or /vtt")
 
-@app.on_message(filters.command(["srt", "vtt", "ass"]))
-async def add_to_queue(client, message):
-    if not is_authorized(message):
-        await message.reply("❌ Not authorized.")
-        return
+@app.on_message(filters.command(["srt","vtt"]))
+async def add(client, message):
+    if not message.reply_to_message:
+        return await message.reply("Reply to video")
 
-    if not message.reply_to_message or not (message.reply_to_message.video or message.reply_to_message.document):
-        await message.reply("❌ Please reply to a video file.")
-        return
+    task_queue.append({
+        "message": message,
+        "format": message.command[0]
+    })
 
-    fmt = message.command[0]
-    task_queue.append({"message": message, "sub_format": fmt})
-    await message.reply(f"✅ Added to queue (Position: {len(task_queue)})")
+    await message.reply(f"✅ Added to queue ({len(task_queue)})")
 
-# ================= WEB SERVER (for Render) =================
-async def web_handler(request):
-    return web.Response(text="✅ Subtitle Baba Bot is running!")
+# ================= WEB =================
+async def health(request):
+    return web.Response(text="OK")
 
-async def start_web_server():
-    server = web.Application()
-    server.router.add_get('/', web_handler)
-    runner = web.AppRunner(server)
+async def start_web():
+    app_web = web.Application()
+    app_web.router.add_get("/", health)
+    runner = web.AppRunner(app_web)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    logger.info(f"🌐 Web server started on port {PORT}")
 
 # ================= MAIN =================
 async def main():
     await app.start()
-    logger.info("✅ Pyrogram Bot Started")
-
-    asyncio.create_task(start_web_server())
-    asyncio.create_task(process_queue())
-
-    logger.info("🚀 Bot is fully ready and listening!")
-    await idle()  # Yeh line ab sahi se chalegi
+    await start_web()
+    asyncio.create_task(worker())
+    print("BOT STARTED")
+    await idle()
 
 if __name__ == "__main__":
     asyncio.run(main())
