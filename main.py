@@ -113,14 +113,50 @@ async def settings_cmd(client, message):
 🔥 Ready!
 """)
 
-# --- POST HANDLER ---
+# --- SHORTENER SETUP ---
+@app.on_message(filters.command("link_shortener") & filters.user(ALLOWED_USERS))
+async def shortener_setup(client, message):
+    uid = message.from_user.id
+    user_data.setdefault(uid, {})
+    user_data[uid]["state"] = "set_url"
+    await message.reply("Shortener domain bhejo (e.g. gplinks.com):")
+
+# --- MESSAGE HANDLER (Combined Post & Input Handler) ---
 @app.on_message(filters.user(ALLOWED_USERS) & filters.private & ~filters.command(["start","link","link_shortener","setting"]))
-async def process_post(client, message):
+async def process_all_messages(client, message):
     uid = message.from_user.id
 
+    # 1. Pehle check karte hain ki user link shortener ya episode set toh nahi kar raha (State check)
     if uid in user_data and user_data[uid].get("state"):
-        return
+        state = user_data[uid].get("state")
 
+        if state == "set_url":
+            bot_settings["shortener_url"] = message.text.strip().replace("https://","").replace("/","")
+            user_data[uid]["state"] = "set_api"
+            await message.reply("API Token bhejo:")
+            return
+
+        elif state == "set_api":
+            bot_settings["shortener_api"] = message.text.strip()
+            user_data[uid]["state"] = None
+            await message.reply("✅ Shortener Set Ho Gya!")
+            return
+
+        elif state == "waiting_num":
+            num = message.text
+            bot_user = (await client.get_me()).username
+            f_link = f"https://t.me/{bot_user}?start=file_id_here"
+            
+            s_link = await get_shortlink(f_link)
+
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton(f"Episode {num}", url=s_link)]])
+            user_data[uid]["final_markup"] = markup
+
+            btns = [[InlineKeyboardButton("Send to Channel", callback_data="send_now")]]
+            await message.reply("Done dabao:", reply_markup=InlineKeyboardMarkup(btns))
+            return
+
+    # 2. Agar koi state active nahi hai, toh iska matlab user ne nai post bheji hai
     if message.text or message.caption or message.photo or message.video or message.document:
         user_data[uid] = {"post": message, "selected_chats": []}
 
@@ -129,14 +165,6 @@ async def process_post(client, message):
             InlineKeyboardButton("Batch Link", callback_data="set_batch")
         ]]
         await message.reply("Option select karo:", reply_markup=InlineKeyboardMarkup(btns))
-
-# --- SHORTENER SETUP ---
-@app.on_message(filters.command("link_shortener") & filters.user(ALLOWED_USERS))
-async def shortener_setup(client, message):
-    uid = message.from_user.id
-    user_data.setdefault(uid, {})
-    user_data[uid]["state"] = "set_url"
-    await message.reply("Shortener domain bhejo (e.g. gplinks.com):")
 
 # --- CALLBACK FIXED ---
 @app.on_callback_query(filters.regex("^(set_single|set_batch|sel_)"))
@@ -169,38 +197,6 @@ async def generate_final_step(client, query):
     uid = query.from_user.id
     user_data[uid]["state"] = "waiting_num"
     await query.message.edit("Episode Number daalo:")
-
-# --- INPUT HANDLER ---
-@app.on_message(filters.private & filters.user(ALLOWED_USERS) & filters.text & ~filters.command(["start","link","link_shortener","setting"]))
-async def handle_inputs(client, message):
-    uid = message.from_user.id
-    if uid not in user_data:
-        return
-
-    state = user_data[uid].get("state")
-
-    if state == "set_url":
-        bot_settings["shortener_url"] = message.text.strip().replace("https://","").replace("/","")
-        user_data[uid]["state"] = "set_api"
-        await message.reply("API Token bhejo:")
-
-    elif state == "set_api":
-        bot_settings["shortener_api"] = message.text.strip()
-        user_data[uid]["state"] = None
-        await message.reply("✅ Shortener Set Ho Gya!")
-
-    elif state == "waiting_num":
-        num = message.text
-
-        bot_user = (await client.get_me()).username
-        f_link = f"https://t.me/{bot_user}?start=file_id_here"
-        s_link = await get_shortlink(f_link)
-
-        markup = InlineKeyboardMarkup([[InlineKeyboardButton(f"Episode {num}", url=s_link)]])
-        user_data[uid]["final_markup"] = markup
-
-        btns = [[InlineKeyboardButton("Send to Channel", callback_data="send_now")]]
-        await message.reply("Done dabao:", reply_markup=InlineKeyboardMarkup(btns))
 
 # --- FINAL SEND ---
 @app.on_callback_query(filters.regex("send_now"))
