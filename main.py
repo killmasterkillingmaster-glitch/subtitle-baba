@@ -14,28 +14,37 @@ from threading import Thread
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- CONFIG ---
-API_ID = int(os.environ.get("API_ID", "12345"))
-API_HASH = os.environ.get("API_HASH", "")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-DB_CHANNEL = int(os.environ.get("DB_CHANNEL", "-100123"))
-LINK_DB_CHANNEL = int(os.environ.get("LINK_DB_CHANNEL", "-100456"))
-ADMINS = [int(i) for i in os.environ.get("ADMINS", "12345").split()]
-FSUB_LINK = os.environ.get("FSUB_LINK", "https://t.me/your_invite_link") 
-FSUB_ID = int(os.environ.get("FSUB_ID", "-100789"))
+# --- CONFIG (NO DEFAULT VALUES) ---
+API_ID = int(os.environ.get("API_ID"))
+API_HASH = os.environ.get("API_HASH")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+
+DB_CHANNEL = int(os.environ.get("DB_CHANNEL"))
+LINK_DB_CHANNEL = int(os.environ.get("LINK_DB_CHANNEL"))
+
+ADMINS = [int(i) for i in os.environ.get("ADMINS").split()]
+
+FSUB_LINK = os.environ.get("FSUB_LINK")
+FSUB_ID = int(os.environ.get("FSUB_ID"))
 
 SHORTENERS = [
-    {"url": "https://api.shareus.io/easy_api", "api": "KEY_1"},
-    {"url": "https://gplinks.in/api", "api": "KEY_2"}
+    {"url": os.environ.get("SHORTENER1_URL"), "api": os.environ.get("SHORTENER1_API")},
+    {"url": os.environ.get("SHORTENER2_URL"), "api": os.environ.get("SHORTENER2_API")}
 ]
+
+BOT_USERNAME = None
 
 app = Client("ASI_ELITE_V4", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 # --- WEB SERVER ---
 web_app = Flask(__name__)
+
 @web_app.route('/')
-def home(): return "Bot Running"
-def run_web(): web_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+def home():
+    return "Bot Running"
+
+def run_web():
+    web_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 
 # --- UTILS ---
 
@@ -47,7 +56,7 @@ async def get_shortlink(long_url):
     try:
         async with aiohttp.ClientSession() as session:
             params = {'api': s['api'], 'url': long_url}
-            async with session.get(s['url'], params=params) as res:
+            async with session.get(s['url'], params=params, timeout=10) as res:
                 data = await res.json()
                 return data.get("shortened_url") or data.get("short_url") or long_url
     except Exception as e:
@@ -65,7 +74,13 @@ async def delete_after(msg, delay):
 
 @app.on_message(filters.command("start") & filters.private)
 async def start(client, message):
+    global BOT_USERNAME
+
     user_id = message.from_user.id
+
+    # Cache bot username
+    if not BOT_USERNAME:
+        BOT_USERNAME = (await client.get_me()).username
 
     # USER TRACKING
     try:
@@ -80,9 +95,10 @@ async def start(client, message):
         btn = [[InlineKeyboardButton("📢 Join Channel", url=FSUB_LINK)]]
         if len(message.command) > 1:
             btn.append([InlineKeyboardButton("🔄 Try Again",
-                url=f"https://t.me/{(await client.get_me()).username}?start={message.command[1]}")])
+                url=f"https://t.me/{BOT_USERNAME}?start={message.command[1]}")])
         return await message.reply("❌ Join channel first!", reply_markup=InlineKeyboardMarkup(btn))
 
+    # NORMAL START
     if len(message.command) < 2:
         return await message.reply(
             "👋 Welcome!\nSend file to generate secure link.",
@@ -94,15 +110,15 @@ async def start(client, message):
 
     token = message.command[1]
 
-    # 🔥 FAST TOKEN FETCH (NO SEARCH)
+    # FAST TOKEN FETCH
     try:
         msg_id = int(token.split("_")[1])
         mapping = await client.get_messages(LINK_DB_CHANNEL, msg_id)
     except:
         return await message.reply("❌ Invalid Link")
 
-    if not mapping:
-        return await message.reply("❌ Link Expired")
+    if not mapping or not mapping.text or "|" not in mapping.text:
+        return await message.reply("❌ Link Expired or Invalid")
 
     try:
         data = mapping.text.split("|")[1].strip()
@@ -112,6 +128,8 @@ async def start(client, message):
             file_id = int(data.split(":")[1])
             file = await client.get_messages(DB_CHANNEL, file_id)
             sent = await file.copy(message.chat.id)
+
+            await message.reply("⚠️ File 2 min me delete ho jayegi!")
             asyncio.create_task(delete_after(sent, 120))
 
         # BATCH
@@ -145,15 +163,18 @@ async def gen(client, message):
     if message.from_user.id not in ADMINS:
         return
 
+    global BOT_USERNAME
+    if not BOT_USERNAME:
+        BOT_USERNAME = (await client.get_me()).username
+
     db_msg = await message.copy(DB_CHANNEL)
 
-    # 🔥 TOKEN WITH MESSAGE ID (FAST)
-    log_msg = await client.send_message(LINK_DB_CHANNEL, f"TEMP")
+    log_msg = await client.send_message(LINK_DB_CHANNEL, "TEMP")
     token = f"t_{log_msg.id}"
 
     await log_msg.edit(f"TOKEN:{token} | FILE:{db_msg.id}")
 
-    long_url = f"https://t.me/{(await client.get_me()).username}?start={token}"
+    long_url = f"https://t.me/{BOT_USERNAME}?start={token}"
     short = await get_shortlink(long_url)
 
     await message.reply(f"🔒 Link:\n{short}")
@@ -164,6 +185,10 @@ async def gen(client, message):
 async def batch(client, message):
     if message.from_user.id not in ADMINS:
         return
+
+    global BOT_USERNAME
+    if not BOT_USERNAME:
+        BOT_USERNAME = (await client.get_me()).username
 
     try:
         start = int(message.command[1])
@@ -177,7 +202,7 @@ async def batch(client, message):
 
         await log_msg.edit(f"TOKEN:{token} | BATCH:{start}:{end}")
 
-        link = f"https://t.me/{(await client.get_me()).username}?start={token}"
+        link = f"https://t.me/{BOT_USERNAME}?start={token}"
         short = await get_shortlink(link)
 
         await message.reply(f"📦 Batch Link:\n{short}")
@@ -200,5 +225,5 @@ async def cb(client, query):
 
 if __name__ == "__main__":
     Thread(target=run_web).start()
-    print("🔥 ELITE BOT V4 RUNNING")
+    print("🔥 ELITE BOT FINAL RUNNING")
     app.run()
