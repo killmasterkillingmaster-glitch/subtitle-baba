@@ -1,12 +1,34 @@
-FROM python:3.10-slim
+# ---------------- BASE IMAGE ----------------
+FROM python:3.11-slim
 
-# Install FFmpeg, gcc, and system tools
-RUN apt-get update && \
-    apt-get install -y ffmpeg libsm6 libxext6 build-essential && \
-    apt-get clean
+# ---------------- ENV SETUP ----------------
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PORT=10000
 
+# ---------------- WORKDIR ----------------
 WORKDIR /app
+
+# ---------------- COPY FILES ----------------
 COPY . /app
+
+# ---------------- SYSTEM DEPENDENCIES ----------------
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        gcc \
+        libffi-dev \
+        libssl-dev \
+        python3-dev \
+        curl \
+        ffmpeg \
+        && rm -rf /var/lib/apt/lists/*
+
+# ---------------- PYTHON DEPENDENCIES ----------------
+RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
-CMD ["python", "main.py"]
+# ---------------- EXPOSE PORT ----------------
+EXPOSE ${PORT}
+
+# ---------------- RUN BOT ----------------
+CMD ["python", "bot.py"]
