@@ -2,7 +2,7 @@ import os
 import asyncio
 import aiohttp
 from pyrogram import Client, filters, enums
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from flask import Flask
 from threading import Thread
 
@@ -35,16 +35,29 @@ bot_settings = {
 
 app = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# --- UTILS ---
+# --- SHORTENER ---
 async def get_shortlink(long_url):
-    if not bot_settings["shortener_api"]:
+    if not bot_settings["shortener_api"] or not bot_settings["shortener_url"]:
         return long_url
-    api_url = f"https://{bot_settings['shortener_url']}/api?api={bot_settings['shortener_api']}&url={long_url}"
+
+    domain = bot_settings["shortener_url"].lower()
+
+    if "gplinks" in domain:
+        api_url = f"https://api.gplinks.com/api?api={bot_settings['shortener_api']}&url={long_url}"
+    else:
+        api_url = f"https://{domain}/api?api={bot_settings['shortener_api']}&url={long_url}"
+
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(api_url) as res:
                 data = await res.json()
-                return data.get("shortenedUrl", long_url)
+                return (
+                    data.get("shortenedUrl")
+                    or data.get("short_url")
+                    or data.get("shortened_url")
+                    or data.get("url")
+                    or long_url
+                )
     except:
         return long_url
 
@@ -80,12 +93,27 @@ async def start_cmd(client, message):
         return
     await message.reply("Bhai, post bhejo pehle!")
 
-# --- SETTING ---
+# --- SETTINGS ---
 @app.on_message(filters.command("setting") & filters.user(ALLOWED_USERS))
 async def settings_cmd(client, message):
-    await message.reply("Commands:\n/start\n/link\n/link_shortener\n/setting")
+    await message.reply("""
+⚙️ **Bot Commands**
 
-# ✅ FIXED POST HANDLER (ONLY CHANGE HERE)
+/start - Bot start  
+/link - Link generate  
+/link_shortener - Shortener set  
+/setting - Commands list  
+
+**Setup:**
+1. Post bhejo  
+2. Link / Batch select karo  
+3. /link  
+4. Done → Number → Send  
+
+🔥 Ready!
+""")
+
+# --- POST HANDLER ---
 @app.on_message(filters.user(ALLOWED_USERS) & filters.private & ~filters.command(["start","link","link_shortener","setting"]))
 async def process_post(client, message):
     uid = message.from_user.id
@@ -102,16 +130,17 @@ async def process_post(client, message):
         ]]
         await message.reply("Option select karo:", reply_markup=InlineKeyboardMarkup(btns))
 
-# --- SHORTENER ---
+# --- SHORTENER SETUP ---
 @app.on_message(filters.command("link_shortener") & filters.user(ALLOWED_USERS))
 async def shortener_setup(client, message):
     uid = message.from_user.id
-    user_data[uid] = {"state": "set_url"}
-    await message.reply("Shortener Website URL bhejein:")
+    user_data.setdefault(uid, {})
+    user_data[uid]["state"] = "set_url"
+    await message.reply("Shortener domain bhejo (e.g. gplinks.com):")
 
-# --- CALLBACKS ---
-@app.on_callback_query()
-async def callbacks(client, query: CallbackQuery):
+# --- CALLBACK FIXED ---
+@app.on_callback_query(filters.regex("^(set_single|set_batch|sel_)"))
+async def callbacks(client, query):
     uid = query.from_user.id
     data = query.data
 
@@ -121,16 +150,12 @@ async def callbacks(client, query: CallbackQuery):
 
     elif data == "set_batch":
         user_data[uid]["mode"] = "batch"
-        await query.message.edit("Pehle Start episode forward karo, fir End episode, fir /link command do.")
+        await query.message.edit("Start & End episode forward karo, fir /link command do.")
 
     elif data.startswith("sel_"):
         chat_id = int(data.split("_")[1])
-        if chat_id not in user_data[uid]["selected_chats"]:
-            user_data[uid]["selected_chats"].append(chat_id)
-            await query.answer("Added!")
-        else:
-            user_data[uid]["selected_chats"].remove(chat_id)
-            await query.answer("Removed!")
+        user_data[uid]["selected_chats"].append(chat_id)
+        await query.answer("Added!")
 
 # --- LINK ---
 @app.on_message(filters.command("link") & filters.user(ALLOWED_USERS))
@@ -140,13 +165,13 @@ async def get_link_command(client, message):
     ]))
 
 @app.on_callback_query(filters.regex("gen_link"))
-async def generate_final_step(client, query: CallbackQuery):
+async def generate_final_step(client, query):
     uid = query.from_user.id
     user_data[uid]["state"] = "waiting_num"
-    await query.message.edit("Episode Number 🤗 daalo:")
+    await query.message.edit("Episode Number daalo:")
 
 # --- INPUT HANDLER ---
-@app.on_message(filters.private & filters.user(ALLOWED_USERS) & filters.text)
+@app.on_message(filters.private & filters.user(ALLOWED_USERS) & filters.text & ~filters.command(["start","link","link_shortener","setting"]))
 async def handle_inputs(client, message):
     uid = message.from_user.id
     if uid not in user_data:
@@ -155,14 +180,14 @@ async def handle_inputs(client, message):
     state = user_data[uid].get("state")
 
     if state == "set_url":
-        bot_settings["shortener_url"] = message.text
+        bot_settings["shortener_url"] = message.text.strip().replace("https://","").replace("/","")
         user_data[uid]["state"] = "set_api"
         await message.reply("API Token bhejo:")
 
     elif state == "set_api":
-        bot_settings["shortener_api"] = message.text
+        bot_settings["shortener_api"] = message.text.strip()
         user_data[uid]["state"] = None
-        await message.reply("Shortener Set 🫠 Ho Gya!")
+        await message.reply("✅ Shortener Set Ho Gya!")
 
     elif state == "waiting_num":
         num = message.text
@@ -174,20 +199,18 @@ async def handle_inputs(client, message):
         markup = InlineKeyboardMarkup([[InlineKeyboardButton(f"Episode {num}", url=s_link)]])
         user_data[uid]["final_markup"] = markup
 
-        # ⚠️ SAME CODE (no change except RAM safe if you want later)
         btns = [[InlineKeyboardButton("Send to Channel", callback_data="send_now")]]
-
         await message.reply("Done dabao:", reply_markup=InlineKeyboardMarkup(btns))
 
 # --- FINAL SEND ---
 @app.on_callback_query(filters.regex("send_now"))
-async def final_send(client, query: CallbackQuery):
+async def final_send(client, query):
     uid = query.from_user.id
     post = user_data[uid]["post"]
     markup = user_data[uid]["final_markup"]
 
     await post.copy(DB_CHANNEL, reply_markup=markup)
-    await query.message.edit("Post send 🤭 ho gaya ✅")
+    await query.message.edit("Post send ho gaya ✅")
 
 # --- RUN ---
 if __name__ == "__main__":
