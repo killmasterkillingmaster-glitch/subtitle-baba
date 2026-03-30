@@ -1,3 +1,4 @@
+# --- SAME IMPORTS ---
 import os
 import asyncio
 import aiohttp
@@ -6,7 +7,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, 
 from flask import Flask
 from threading import Thread
 
-# --- WEB SERVER FOR RENDER (Port 10000) ---
+# --- WEB SERVER ---
 web_app = Flask(__name__)
 
 @web_app.route('/')
@@ -16,7 +17,7 @@ def health_check():
 def run_web():
     web_app.run(host="0.0.0.0", port=10000)
 
-# --- CONFIGURATION (Environment Variables) ---
+# --- CONFIG ---
 API_ID = int(os.environ.get("API_ID", "12345"))
 API_HASH = os.environ.get("API_HASH", "your_hash")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "your_token")
@@ -26,7 +27,6 @@ ALLOWED_USERS = [int(x) for x in os.environ.get("ALLOWED_USERS", "5351848105,534
 DB_CHANNEL = int(os.environ.get("DB_CHANNEL", "-1003143681742"))
 EXTRA_CHANNEL = int(os.environ.get("EXTRA_CHANNEL", "-1003872932495"))
 
-# In-memory storage
 user_data = {}
 bot_settings = {
     "shortener_api": os.environ.get("SHORT_API", ""),
@@ -59,8 +59,7 @@ async def is_subscribed(user_id):
             continue
     return True
 
-# --- HANDLERS ---
-
+# --- START ---
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(client, message):
     if len(message.text.split()) > 1:
@@ -82,12 +81,34 @@ async def start_cmd(client, message):
         return
     await message.reply("Bhai, post bhejo pehle!")
 
+# ✅ SETTING COMMAND (NEW)
+@app.on_message(filters.command("setting") & filters.user(ALLOWED_USERS))
+async def settings_cmd(client, message):
+    text = """
+⚙️ **Bot Settings / Commands**
+
+/start - Bot start
+/link - Link generate start kare
+/link_shortener - Shortener set kare
+/setting - Commands list dekhe
+
+Flow:
+1. Post bhejo
+2. Link ya Batch select karo
+3. Episode forward karo
+4. /link
+5. Done → Number → Channel select
+
+🔥 Bot Ready Hai!
+"""
+    await message.reply(text)
+
 # ✅ FIXED POST HANDLER
 @app.on_message(filters.user(ALLOWED_USERS) & filters.private)
 async def process_post(client, message):
     uid = message.from_user.id
 
-    # ❗ IMPORTANT FIX: agar user kisi state me hai toh ignore
+    # 🔥 FIX: agar state active hai toh ignore
     if uid in user_data and user_data[uid].get("state"):
         return
 
@@ -95,7 +116,7 @@ async def process_post(client, message):
     if message.text and message.text.startswith("/"):
         return
 
-    # real post only
+    # sirf real post
     if message.text or message.caption or message.photo or message.video or message.document:
         user_data[uid] = {"post": message, "selected_chats": []}
 
@@ -105,13 +126,14 @@ async def process_post(client, message):
         ]]
         await message.reply("Option select karo:", reply_markup=InlineKeyboardMarkup(btns))
 
-# ✅ NEW FIXED SHORTENER COMMAND
+# ✅ SHORTENER COMMAND
 @app.on_message(filters.command("link_shortener") & filters.user(ALLOWED_USERS))
 async def shortener_setup(client, message):
     uid = message.from_user.id
     user_data[uid] = {"state": "set_url"}
     await message.reply("Shortener Website URL bhejein (e.g. shareus.io):")
 
+# --- CALLBACKS ---
 @app.on_callback_query()
 async def callbacks(client, query: CallbackQuery):
     uid = query.from_user.id
@@ -134,6 +156,7 @@ async def callbacks(client, query: CallbackQuery):
             user_data[uid]["selected_chats"].remove(chat_id)
             await query.answer("Removed!")
 
+# --- LINK ---
 @app.on_message(filters.command("link") & filters.user(ALLOWED_USERS))
 async def get_link_command(client, message):
     await message.reply("Done pe click karein", reply_markup=InlineKeyboardMarkup([
@@ -146,7 +169,8 @@ async def generate_final_step(client, query: CallbackQuery):
     user_data[uid]["state"] = "waiting_num"
     await query.message.edit("Episode Number daalo (e.g. 06 ya 08-12):")
 
-@app.on_message(filters.private & filters.user(ALLOWED_USERS))
+# ✅ FIXED INPUT HANDLER
+@app.on_message(filters.private & filters.user(ALLOWED_USERS) & filters.text)
 async def handle_inputs(client, message):
     uid = message.from_user.id
     if uid not in user_data:
@@ -182,6 +206,7 @@ async def handle_inputs(client, message):
 
         await message.reply("Channels select karo aur Done dabao:", reply_markup=InlineKeyboardMarkup(btns))
 
+# --- FINAL SEND ---
 @app.on_callback_query(filters.regex("send_now"))
 async def final_send(client, query: CallbackQuery):
     uid = query.from_user.id
@@ -197,8 +222,7 @@ async def final_send(client, query: CallbackQuery):
 
     await query.message.edit("Post sabhi channels pe bhej di gayi hai! ✅")
 
-# Start Flask and Bot
+# --- RUN ---
 if __name__ == "__main__":
-    t = Thread(target=run_web)
-    t.start()
+    Thread(target=run_web).start()
     app.run()
