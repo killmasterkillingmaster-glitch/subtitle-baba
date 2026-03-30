@@ -1,15 +1,12 @@
-FROM python:3.11-slim
+FROM python:3.10-slim
+
+# Install FFmpeg, gcc, and system tools
+RUN apt-get update && \
+    apt-get install -y ffmpeg libsm6 libxext6 build-essential && \
+    apt-get clean
 
 WORKDIR /app
-
-# Copy files
-COPY main.py requirements.txt ./
-
-# Install dependencies
+COPY . /app
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Expose port for web server
-EXPOSE 8080
-
-# Start bot
 CMD ["python", "main.py"]
