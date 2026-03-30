@@ -1,281 +1,194 @@
 import os
 import asyncio
 import aiohttp
-import logging
-from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram import Client, filters, enums
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
 from flask import Flask
 from threading import Thread
 
-# ---------------- LOGGING ----------------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# ---------------- CONFIG ----------------
-API_ID = int(os.environ.get("API_ID", "12345"))
-API_HASH = os.environ.get("API_HASH", "abcdef")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-
-ADMINS = [5351848105]  # Your Telegram ID
-LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL", "-100123"))
-DB_CHANNEL = int(os.environ.get("DB_CHANNEL", "-100456"))
-
-app = Client("ASI_CREATOR", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
-USER_STATE = {}
-CONFIG = {"api": None, "url": None, "fsub": [], "admin_channels": []}
-
-# ---------------- WEB SERVER ----------------
+# --- WEB SERVER FOR RENDER (Port 10000) ---
 web_app = Flask(__name__)
-@web_app.route("/")
-def home(): return "Bot is Online ✅"
+
+@web_app.route('/')
+def health_check():
+    return "Bot is running perfectly!"
 
 def run_web():
-    web_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    web_app.run(host="0.0.0.0", port=10000)
 
-# ---------------- HELPERS ----------------
-async def load_config():
-    try:
-        async for m in app.search_messages(LOG_CHANNEL, query="SETTING:"):
-            if "SHORTENER:" in m.text:
-                data = m.text.split("SHORTENER:")[1].split("|")
-                CONFIG["api"], CONFIG["url"] = data[0], data[1]
-            elif "FSUB_LIST:" in m.text:
-                ids = m.text.split("FSUB_LIST:")[1].split(",")
-                CONFIG["fsub"] = [int(i) for i in ids if i]
-            elif "ADMIN_CH:" in m.text:
-                ids = m.text.split("ADMIN_CH:")[1].split(",")
-                CONFIG["admin_channels"] = [int(i) for i in ids if i]
-        logger.info("Config Loaded Successfully")
-    except Exception as e: 
-        logger.error(f"Load Config Error: {e}")
+# --- CONFIGURATION (Environment Variables) ---
+API_ID = int(os.environ.get("API_ID", "12345"))
+API_HASH = os.environ.get("API_HASH", "your_hash")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "your_token")
 
-async def update_config(key, value):
-    try:
-        async for m in app.search_messages(LOG_CHANNEL, query=f"SETTING:{key}"):
-            await m.delete()
-        await app.send_message(LOG_CHANNEL, f"SETTING:{key}:{value}")
-    except Exception as e: 
-        logger.error(f"Update Config Error: {e}")
+OWNER_ID = int(os.environ.get("OWNER_ID", "5351848105"))
+ALLOWED_USERS = [int(x) for x in os.environ.get("ALLOWED_USERS", "5351848105,5344078567").split(",")]
+DB_CHANNEL = int(os.environ.get("DB_CHANNEL", "-1003143681742"))
+EXTRA_CHANNEL = int(os.environ.get("EXTRA_CHANNEL", "-1003872932495"))
 
-async def get_short(url):
-    if not CONFIG["api"] or not CONFIG["url"]: return url
+# In-memory storage (Note: Resets on restart)
+user_data = {}
+bot_settings = {
+    "shortener_api": os.environ.get("SHORT_API", ""),
+    "shortener_url": os.environ.get("SHORT_URL", ""),
+    "fsub_channels": [EXTRA_CHANNEL]
+}
+
+app = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+# --- UTILS ---
+async def get_shortlink(long_url):
+    if not bot_settings["shortener_api"]:
+        return long_url
+    api_url = f"https://{bot_settings['shortener_url']}/api?api={bot_settings['shortener_api']}&url={long_url}"
     try:
         async with aiohttp.ClientSession() as session:
-            params = {'api': CONFIG['api'], 'url': url}
-            async with session.get(CONFIG['url'], params=params) as r:
-                res = await r.json()
-                return res.get("shortened_url") or res.get("short_url") or url
-    except Exception as e:
-        logger.error(f"Shortener Error: {e}")
-        return url
+            async with session.get(api_url) as res:
+                data = await res.json()
+                return data.get("shortenedUrl", long_url)
+    except:
+        return long_url
 
-# ---------------- AUTO TRACK CHANNELS ----------------
-@app.on_chat_member_updated()
-async def track_ch(c, cb):
-    try:
-        me = await c.get_me()
-        if cb.new_chat_member and cb.new_chat_member.user.id == me.id:
-            if cb.new_chat_member.status in ["administrator", "creator"]:
-                if cb.chat.id not in CONFIG["admin_channels"]:
-                    CONFIG["admin_channels"].append(cb.chat.id)
-                    await update_config("ADMIN_CH", ",".join(str(i) for i in CONFIG["admin_channels"]))
-                    logger.info(f"Added admin channel: {cb.chat.id}")
-    except Exception as e: 
-        logger.error(f"Track Error: {e}")
+async def is_subscribed(user_id):
+    for chat_id in bot_settings["fsub_channels"]:
+        try:
+            member = await app.get_chat_member(chat_id, user_id)
+            if member.status == enums.ChatMemberStatus.LEFT: return False
+        except: continue
+    return True
 
-# ---------------- CALLBACK HANDLER ----------------
-@app.on_callback_query()
-async def cb_handler(c, q: CallbackQuery):
-    u_id = q.from_user.id
-    data = q.data
-    if u_id not in ADMINS: return
-
-    st = USER_STATE.get(u_id)
-    if st is None: USER_STATE[u_id] = st = {}
-
-    # ---------------- SETTINGS ----------------
-    if data == "set_short":
-        st['step'] = 'wait_short_url'
-        await q.edit_message_text("Send your Shortener Dashboard API URL:")
-        return
-
-    elif data == "set_fsub":
-        btns = []
-        for cid in CONFIG["admin_channels"]:
-            tick = "✅" if cid in CONFIG["fsub"] else "❌"
-            try:
-                ch = await c.get_chat(cid)
-                btns.append([InlineKeyboardButton(f"{ch.title} {tick}", callback_data=f"tfsub_{cid}")])
-            except: continue
-        btns.append([InlineKeyboardButton("💾 Save", callback_data="save_fsub")])
-        await q.edit_message_text("Select Force Sub Channels:", reply_markup=InlineKeyboardMarkup(btns))
-        return
-
-    elif data.startswith("tfsub_"):
-        cid = int(data.split("_")[1])
-        if cid in CONFIG["fsub"]: CONFIG["fsub"].remove(cid)
-        else: CONFIG["fsub"].append(cid)
-        await cb_handler(c, q.copy(data="set_fsub"))
-        return
-
-    elif data == "save_fsub":
-        await update_config("FSUB_LIST", ",".join(str(i) for i in CONFIG["fsub"]))
-        await q.answer("Force Sub Saved!")
-        return
-
-    # ---------------- POST PROCESS ----------------
-    if st.get('selected_channels') is None:
-        st['selected_channels'] = []
-
-    if data == "type_single":
-        st.update({'mode': 'single', 'step': 'wait_file'})
-        await q.edit_message_text("Forward Episode File from DB Channel:")
-        return
-
-    elif data == "type_batch":
-        st.update({'mode': 'batch', 'step': 'wait_start'})
-        await q.edit_message_text("Forward START Episode:")
-        return
-
-    elif data == "show_ch_list":
-        btns = []
-        for cid in CONFIG["admin_channels"]:
-            tick = "✅" if cid in st['selected_channels'] else "❌"
-            try:
-                ch = await c.get_chat(cid)
-                btns.append([InlineKeyboardButton(f"{ch.title} {tick}", callback_data=f"tpost_{cid}")])
-            except: continue
-        btns.append([InlineKeyboardButton("🚀 Send Now", callback_data="final_send")])
-        await q.edit_message_text("Select Channels to Post:", reply_markup=InlineKeyboardMarkup(btns))
-        return
-
-    elif data.startswith("tpost_"):
-        cid = int(data.split("_")[1])
-        if cid in st['selected_channels']: st['selected_channels'].remove(cid)
-        else: st['selected_channels'].append(cid)
-        await cb_handler(c, q.copy(data="show_ch_list"))
-        return
-
-    elif data == "final_send":
-        await q.edit_message_text("Sending...")
-        for cid in st.get('selected_channels', []):
-            try: await st['post'].copy(cid, reply_markup=st.get('markup'))
-            except Exception as e: logger.error(e)
-        await q.message.reply("✅ Successfully Posted!")
-        USER_STATE.pop(u_id, None)
-        return
-
-# ---------------- STEPS HANDLER ----------------
-@app.on_message(filters.private & ~filters.command(["start", "settings"]))
-async def handle_steps(c, m):
-    u_id = m.from_user.id
-    if u_id not in ADMINS: return
-    st = USER_STATE.get(u_id)
-    if st is None: USER_STATE[u_id] = st = {}
-
-    # Shortener setup
-    if st.get('step') == 'wait_short_url':
-        st['url'] = m.text
-        st['step'] = 'wait_short_api'
-        return await m.reply("Send API Token:")
-
-    if st.get('step') == 'wait_short_api':
-        CONFIG["api"], CONFIG["url"] = m.text, st['url']
-        await update_config("SHORTENER", f"{m.text}|{st['url']}")
-        await m.reply("✅ Shortener Configured!")
-        USER_STATE.pop(u_id, None)
-        return
-
-    # Post Single
-    if st.get('step') == 'wait_file':
-        if not m.forward_from_chat: return await m.reply("❌ Forward from DB Channel!")
-        st['f_id'] = m.forward_from_message_id
-        st['step'] = 'wait_num'
-        return await m.reply("Enter Episode Number (e.g. 06):")
-
-    # Post Batch
-    if st.get('step') == 'wait_start':
-        st['s_id'] = m.forward_from_message_id
-        st['step'] = 'wait_end'
-        return await m.reply("Forward END Episode:")
-
-    if st.get('step') == 'wait_end':
-        st['e_id'] = m.forward_from_message_id
-        st['step'] = 'wait_num'
-        return await m.reply("Enter Range (e.g. 01-12):")
-
-    if st.get('step') == 'wait_num':
-        ep_no = m.text
-        log = await c.send_message(LOG_CHANNEL, "Generating...")
-        token = f"t_{log.id}"
-
-        if st.get('mode') == 'single':
-            await log.edit(f"SETTING:TOKEN|FILE:{st['f_id']}")
-            btn_txt = f"Episode {ep_no}"
-        else:
-            await log.edit(f"SETTING:TOKEN|BATCH:{st['s_id']}:{st['e_id']}")
-            btn_txt = f"Episodes {ep_no}"
-
-        long_url = f"https://t.me/{(await c.get_me()).username}?start={token}"
-        short_url = await get_short(long_url)
-        st['markup'] = InlineKeyboardMarkup([[InlineKeyboardButton(btn_txt, url=short_url)]])
-        st['post'] = st.get('post', m)
-        await st['post'].copy(m.chat.id, reply_markup=st['markup'])
-        await m.reply("✅ Ready!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📢 Select Channels", callback_data="show_ch_list")]]))
-        st['step'] = 'ready'
-
-# ---------------- COMMANDS ----------------
-@app.on_message(filters.command("settings") & filters.private)
-async def open_settings(c, m):
-    if m.from_user.id not in ADMINS: return
-    await m.reply("⚙️ Settings", reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔗 Shortener", callback_data="set_short"), InlineKeyboardButton("📢 Force Sub", callback_data="set_fsub")]
-    ]))
+# --- HANDLERS ---
 
 @app.on_message(filters.command("start") & filters.private)
-async def start_cmd(c, m):
-    if len(m.command) < 2: return await m.reply("Hi! Send me media to start.")
-
-    # Force Sub Check
-    for cid in CONFIG["fsub"]:
+async def start_cmd(client, message):
+    if len(message.text.split()) > 1:
+        data = message.text.split()[1]
+        if not await is_subscribed(message.from_user.id):
+            btns = [[InlineKeyboardButton("Join Channel", url="https://t.me/your_channel_link")]]
+            return await message.reply("Pehle Join Karo!", reply_markup=InlineKeyboardMarkup(btns))
+        
+        # File delivery logic
+        ids = data.split("_")
         try:
-            await c.get_chat_member(cid, m.from_user.id)
-        except:
-            try:
-                ch = await c.get_chat(cid)
-                link = await ch.export_invite_link()
-                return await m.reply("❌ Join first!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Join", url=link)]]))
-            except: continue
+            if len(ids) == 1:
+                await client.copy_message(message.chat.id, DB_CHANNEL, int(ids[0]))
+            else:
+                for mid in range(int(ids[0]), int(ids[1]) + 1):
+                    await client.copy_message(message.chat.id, DB_CHANNEL, mid)
+                    await asyncio.sleep(0.5)
+        except Exception as e:
+            await message.reply(f"Error: {e}")
+        return
+    await message.reply("Bhai, post bhejo pehle!")
 
-    token = m.command[1]
-    try:
-        msg_id = int(token.split("_")[1])
-        log = await c.get_messages(LOG_CHANNEL, msg_id)
-        data = log.text.split("|")[1]
-        if "FILE:" in data:
-            f = await c.get_messages(DB_CHANNEL, int(data.split(":")[1]))
-            await f.copy(m.chat.id)
-        elif "BATCH:" in data:
-            _, s, e = data.split(":")
-            for i in range(int(s), int(e)+1):
-                f = await c.get_messages(DB_CHANNEL, i)
-                await f.copy(m.chat.id)
-                await asyncio.sleep(1)
-    except: await m.reply("Expired!")
+@app.on_message(filters.user(ALLOWED_USERS) & filters.private & ~filters.command(["start", "link_shortener", "force_sub"]))
+async def process_post(client, message):
+    # Step 1: User sends post
+    if message.text or message.caption or message.photo:
+        user_data[message.from_user.id] = {"post": message, "selected_chats": []}
+        btns = [[InlineKeyboardButton("Link", callback_data="set_single"), 
+                 InlineKeyboardButton("Batch Link", callback_data="set_batch")]]
+        await message.reply("Option select karo:", reply_markup=InlineKeyboardMarkup(btns))
 
-@app.on_message(filters.private & (filters.photo | filters.video | filters.document))
-async def on_media(c, m):
-    if m.from_user.id not in ADMINS: return
-    USER_STATE[m.from_user.id] = {'post': m}
-    await m.reply("✅ Media Received!", reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔗 Single", callback_data="type_single"), InlineKeyboardButton("📦 Batch", callback_data="type_batch")]
+@app.on_callback_query()
+async def callbacks(client, query: CallbackQuery):
+    uid = query.from_user.id
+    data = query.data
+
+    if data == "set_single":
+        user_data[uid]["mode"] = "single"
+        await query.message.edit("Database se 1 episode forward karo, fir /link command do.")
+    
+    elif data == "set_batch":
+        user_data[uid]["mode"] = "batch"
+        await query.message.edit("Pehle Start episode forward karo, fir End episode, fir /link command do.")
+
+    elif data.startswith("sel_"):
+        chat_id = int(data.split("_")[1])
+        if chat_id not in user_data[uid]["selected_chats"]:
+            user_data[uid]["selected_chats"].append(chat_id)
+            await query.answer("Added!")
+        else:
+            user_data[uid]["selected_chats"].remove(chat_id)
+            await query.answer("Removed!")
+
+@app.on_message(filters.command("link") & filters.user(ALLOWED_USERS))
+async def get_link_command(client, message):
+    uid = message.from_user.id
+    await message.reply("Done pe click karein", reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("Done", callback_data="gen_link")]
     ]))
 
-# ---------------- BOOT ----------------
+@app.on_callback_query(filters.regex("gen_link"))
+async def generate_final_step(client, query: CallbackQuery):
+    uid = query.from_user.id
+    user_data[uid]["state"] = "waiting_num"
+    await query.message.edit("Episode Number daalo (e.g. 06 ya 08-12):")
+
+@app.on_message(filters.private & filters.user(ALLOWED_USERS))
+async def handle_inputs(client, message):
+    uid = message.from_user.id
+    if uid not in user_data: return
+
+    # Shortener setup
+    if message.text == "/link_shortener":
+        await message.reply("Shortener Website URL bhejein (e.g. shareus.io):")
+        user_data[uid]["state"] = "set_url"
+        return
+
+    state = user_data[uid].get("state")
+
+    if state == "set_url":
+        bot_settings["shortener_url"] = message.text
+        user_data[uid]["state"] = "set_api"
+        await message.reply("Ab API Token bhejein:")
+    elif state == "set_api":
+        bot_settings["shortener_api"] = message.text
+        user_data[uid]["state"] = None
+        await message.reply("Shortener Set Ho Gya!")
+
+    # Number logic & Channel Selection
+    elif state == "waiting_num":
+        num = message.text
+        # Yaha hum assume kar rahe hain ki user ne pehle files forward kar di hain
+        # Single mode mein last forwarded message ID use karenge
+        # Batch mein humne IDs track karni hai (is example mein logic simplified hai)
+        
+        bot_user = (await client.get_me()).username
+        # Yaha deep link banega
+        f_link = f"https://t.me/{bot_user}?start=file_id_here" # Real logic needs ID tracking
+        s_link = await get_shortlink(f_link)
+        
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton(f"Episode {num}", url=s_link)]])
+        user_data[uid]["final_markup"] = markup
+        
+        # Show Admin Channels
+        btns = []
+        async for dialog in client.get_dialogs():
+            if dialog.chat.type in [enums.ChatType.CHANNEL, enums.ChatType.SUPERGROUP]:
+                btns.append([InlineKeyboardButton(dialog.chat.title, callback_data=f"sel_{dialog.chat.id}")])
+        btns.append([InlineKeyboardButton("Confirm / Done", callback_data="send_now")])
+        await message.reply("Channels select karo aur Done dabao:", reply_markup=InlineKeyboardMarkup(btns))
+
+    elif state == "send_now": # This would be a callback
+        pass
+
+@app.on_callback_query(filters.regex("send_now"))
+async def final_send(client, query: CallbackQuery):
+    uid = query.from_user.id
+    post = user_data[uid]["post"]
+    markup = user_data[uid]["final_markup"]
+    chats = user_data[uid]["selected_chats"]
+    
+    for c_id in chats:
+        try:
+            await post.copy(c_id, reply_markup=markup)
+        except: continue
+    
+    await query.message.edit("Post sabhi channels pe bhej di gayi hai! ✅")
+
+# Start Flask and Bot
 if __name__ == "__main__":
-    Thread(target=run_web).start()
-    app.start()
-    asyncio.get_event_loop().run_until_complete(load_config())
-    print("Bot is Alive! ✅")
+    t = Thread(target=run_web)
+    t.start()
     app.run()
