@@ -1,4 +1,4 @@
-pyrogram==2.0.34
+pyrogram
 tgcrypto
 aiohttp
 flask
