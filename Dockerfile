@@ -1,34 +1,21 @@
-# ---------------- BASE IMAGE ----------------
-FROM python:3.11-slim
+FROM python:3.10-slim
 
-# ---------------- ENV SETUP ----------------
-ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PORT=10000
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y ffmpeg libsm6 libxext6 build-essential && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# ---------------- WORKDIR ----------------
 WORKDIR /app
 
-# ---------------- COPY FILES ----------------
+# Copy all files
 COPY . /app
 
-# ---------------- SYSTEM DEPENDENCIES ----------------
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        gcc \
-        libffi-dev \
-        libssl-dev \
-        python3-dev \
-        curl \
-        ffmpeg \
-        && rm -rf /var/lib/apt/lists/*
-
-# ---------------- PYTHON DEPENDENCIES ----------------
+# Upgrade pip and install dependencies
 RUN pip install --upgrade pip
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir pyrogram==2.0.34 tgcrypto aiohttp flask
 
-# ---------------- EXPOSE PORT ----------------
-EXPOSE ${PORT}
+# Expose PORT for Flask (optional)
+EXPOSE 10000
 
-# ---------------- RUN BOT ----------------
-CMD ["python", "bot.py"]
+# Run bot
+CMD ["python", "main.py"]
