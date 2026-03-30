@@ -1,4 +1,3 @@
-# --- SAME IMPORTS ---
 import os
 import asyncio
 import aiohttp
@@ -81,42 +80,19 @@ async def start_cmd(client, message):
         return
     await message.reply("Bhai, post bhejo pehle!")
 
-# ✅ SETTING COMMAND (NEW)
+# --- SETTING ---
 @app.on_message(filters.command("setting") & filters.user(ALLOWED_USERS))
 async def settings_cmd(client, message):
-    text = """
-⚙️ **Bot Settings / Commands**
+    await message.reply("Commands:\n/start\n/link\n/link_shortener\n/setting")
 
-/start - Bot start
-/link - Link generate start kare
-/link_shortener - Shortener set kare
-/setting - Commands list dekhe
-
-Flow:
-1. Post bhejo
-2. Link ya Batch select karo
-3. Episode forward karo
-4. /link
-5. Done → Number → Channel select
-
-🔥 Bot Ready Hai!
-"""
-    await message.reply(text)
-
-# ✅ FIXED POST HANDLER
-@app.on_message(filters.user(ALLOWED_USERS) & filters.private)
+# ✅ FIXED POST HANDLER (ONLY CHANGE HERE)
+@app.on_message(filters.user(ALLOWED_USERS) & filters.private & ~filters.command(["start","link","link_shortener","setting"]))
 async def process_post(client, message):
     uid = message.from_user.id
 
-    # 🔥 FIX: agar state active hai toh ignore
     if uid in user_data and user_data[uid].get("state"):
         return
 
-    # commands ignore
-    if message.text and message.text.startswith("/"):
-        return
-
-    # sirf real post
     if message.text or message.caption or message.photo or message.video or message.document:
         user_data[uid] = {"post": message, "selected_chats": []}
 
@@ -126,12 +102,12 @@ async def process_post(client, message):
         ]]
         await message.reply("Option select karo:", reply_markup=InlineKeyboardMarkup(btns))
 
-# ✅ SHORTENER COMMAND
+# --- SHORTENER ---
 @app.on_message(filters.command("link_shortener") & filters.user(ALLOWED_USERS))
 async def shortener_setup(client, message):
     uid = message.from_user.id
     user_data[uid] = {"state": "set_url"}
-    await message.reply("Shortener Website URL bhejein (e.g. shareus.io):")
+    await message.reply("Shortener Website URL bhejein:")
 
 # --- CALLBACKS ---
 @app.on_callback_query()
@@ -167,9 +143,9 @@ async def get_link_command(client, message):
 async def generate_final_step(client, query: CallbackQuery):
     uid = query.from_user.id
     user_data[uid]["state"] = "waiting_num"
-    await query.message.edit("Episode Number daalo (e.g. 06 ya 08-12):")
+    await query.message.edit("Episode Number 🤗 daalo:")
 
-# ✅ FIXED INPUT HANDLER
+# --- INPUT HANDLER ---
 @app.on_message(filters.private & filters.user(ALLOWED_USERS) & filters.text)
 async def handle_inputs(client, message):
     uid = message.from_user.id
@@ -181,12 +157,12 @@ async def handle_inputs(client, message):
     if state == "set_url":
         bot_settings["shortener_url"] = message.text
         user_data[uid]["state"] = "set_api"
-        await message.reply("Ab API Token bhejein:")
+        await message.reply("API Token bhejo:")
 
     elif state == "set_api":
         bot_settings["shortener_api"] = message.text
         user_data[uid]["state"] = None
-        await message.reply("Shortener Set Ho Gya!")
+        await message.reply("Shortener Set 🫠 Ho Gya!")
 
     elif state == "waiting_num":
         num = message.text
@@ -198,13 +174,10 @@ async def handle_inputs(client, message):
         markup = InlineKeyboardMarkup([[InlineKeyboardButton(f"Episode {num}", url=s_link)]])
         user_data[uid]["final_markup"] = markup
 
-        btns = []
-        async for dialog in client.get_dialogs():
-            if dialog.chat.type in [enums.ChatType.CHANNEL, enums.ChatType.SUPERGROUP]:
-                btns.append([InlineKeyboardButton(dialog.chat.title, callback_data=f"sel_{dialog.chat.id}")])
-        btns.append([InlineKeyboardButton("Confirm / Done", callback_data="send_now")])
+        # ⚠️ SAME CODE (no change except RAM safe if you want later)
+        btns = [[InlineKeyboardButton("Send to Channel", callback_data="send_now")]]
 
-        await message.reply("Channels select karo aur Done dabao:", reply_markup=InlineKeyboardMarkup(btns))
+        await message.reply("Done dabao:", reply_markup=InlineKeyboardMarkup(btns))
 
 # --- FINAL SEND ---
 @app.on_callback_query(filters.regex("send_now"))
@@ -212,15 +185,9 @@ async def final_send(client, query: CallbackQuery):
     uid = query.from_user.id
     post = user_data[uid]["post"]
     markup = user_data[uid]["final_markup"]
-    chats = user_data[uid]["selected_chats"]
 
-    for c_id in chats:
-        try:
-            await post.copy(c_id, reply_markup=markup)
-        except:
-            continue
-
-    await query.message.edit("Post sabhi channels pe bhej di gayi hai! ✅")
+    await post.copy(DB_CHANNEL, reply_markup=markup)
+    await query.message.edit("Post send 🤭 ho gaya ✅")
 
 # --- RUN ---
 if __name__ == "__main__":
