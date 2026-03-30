@@ -28,7 +28,7 @@ web_app = Flask(__name__)
 def home(): return "Bot is Online ✅"
 
 def run_web():
-    web_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    web_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
 # ---------------- HELPERS ----------------
 async def load_config():
