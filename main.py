@@ -1,179 +1,204 @@
 import os
-import gc
-import logging
 import asyncio
-from collections import deque
-from pyrogram import Client, filters, idle
-from pyrogram.types import Message
-from pyrogram.enums import ParseMode
-from faster_whisper import WhisperModel
-from aiohttp import web
+import random
+import string
+import aiohttp
+import logging
+from pyrogram import Client, filters
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.errors import UserNotParticipant, FloodWait
+from flask import Flask
+from threading import Thread
 
-# ================= CONFIG =================
-
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-PORT = int(os.getenv("PORT", "8080"))
-
-if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN missing! Set it in Render ENV")
-
-OWNER_ID = int(os.getenv("OWNER_ID", "5344078567"))
-
-def parse_ids(value, default):
-    if not value:
-        return default
-    return [int(x.strip()) for x in value.split(",") if x.strip()]
-
-ALLOWED_USERS = parse_ids(os.getenv("ALLOWED_USERS"), [])
-ALLOWED_GROUPS = parse_ids(os.getenv("ALLOWED_GROUPS"), [-1003899919015])
-
+# --- LOGGING ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = Client("SubGenBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# --- CONFIG ---
+API_ID = int(os.environ.get("API_ID", "12345"))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+DB_CHANNEL = int(os.environ.get("DB_CHANNEL", "-100123"))
+LINK_DB_CHANNEL = int(os.environ.get("LINK_DB_CHANNEL", "-100456"))
+ADMINS = [int(i) for i in os.environ.get("ADMINS", "12345").split()]
+FSUB_LINK = os.environ.get("FSUB_LINK", "https://t.me/your_invite_link") 
+FSUB_ID = int(os.environ.get("FSUB_ID", "-100789"))
 
-# ================= GLOBALS =================
-task_queue = deque()
-model = None
+SHORTENERS = [
+    {"url": "https://api.shareus.io/easy_api", "api": "KEY_1"},
+    {"url": "https://gplinks.in/api", "api": "KEY_2"}
+]
 
-# ================= AUTH =================
-def is_authorized(message: Message):
-    user_id = message.from_user.id if message.from_user else 0
-    chat_id = message.chat.id
+app = Client("ASI_ELITE_V4", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-    return (
-        user_id == OWNER_ID
-        or user_id in ALLOWED_USERS
-        or chat_id in ALLOWED_GROUPS
-    )
+# --- WEB SERVER ---
+web_app = Flask(__name__)
+@web_app.route('/')
+def home(): return "Bot Running"
+def run_web(): web_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
 
-# ================= MODEL =================
-def load_model():
-    global model
-    if model is None:
-        logger.info("Loading Whisper Tiny Model...")
-        model = WhisperModel("tiny", device="cpu", compute_type="int8")
-    return model
+# --- UTILS ---
 
-# ================= TIME =================
-def srt_time(s):
-    return f"{int(s//3600):02}:{int((s%3600)//60):02}:{int(s%60):02},{int((s%1)*1000):03}"
+def generate_token():
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=10))
 
-def vtt_time(s):
-    return f"{int(s//3600):02}:{int((s%3600)//60):02}:{int(s%60):02}.{int((s%1)*1000):03}"
+async def get_shortlink(long_url):
+    s = random.choice(SHORTENERS)
+    try:
+        async with aiohttp.ClientSession() as session:
+            params = {'api': s['api'], 'url': long_url}
+            async with session.get(s['url'], params=params) as res:
+                data = await res.json()
+                return data.get("shortened_url") or data.get("short_url") or long_url
+    except Exception as e:
+        logger.error(f"Shortener failed: {e}")
+        return long_url
 
-# ================= SUB =================
-def generate_sub(segments, file, fmt):
-    with open(file, "w", encoding="utf-8") as f:
-        if fmt == "vtt":
-            f.write("WEBVTT\n\n")
+async def delete_after(msg, delay):
+    await asyncio.sleep(delay)
+    try:
+        await msg.delete()
+    except Exception as e:
+        logger.error(f"Delete error: {e}")
 
-        for i, seg in enumerate(segments, 1):
-            text = seg.text.strip()
-            if not text:
-                continue
+# --- START HANDLER ---
 
-            if fmt == "srt":
-                f.write(f"{i}\n{srt_time(seg.start)} --> {srt_time(seg.end)}\n{text}\n\n")
-            else:
-                f.write(f"{vtt_time(seg.start)} --> {vtt_time(seg.end)}\n{text}\n\n")
-
-# ================= WORKER =================
-async def worker():
-    while True:
-        if not task_queue:
-            await asyncio.sleep(2)
-            continue
-
-        task = task_queue.popleft()
-        message = task["message"]
-        fmt = task["format"]
-
-        chat_id = message.chat.id
-        msg_id = message.id
-
-        status = await message.reply("⏳ Processing...")
-
-        video = f"v_{chat_id}_{msg_id}.mp4"
-        audio = f"a_{chat_id}_{msg_id}.mp3"
-        sub = f"sub_{chat_id}_{msg_id}.{fmt}"
-
-        try:
-            await app.download_media(message.reply_to_message, file_name=video)
-
-            await status.edit("🎵 Extracting audio...")
-
-            proc = await asyncio.create_subprocess_shell(
-                f"ffmpeg -i {video} -vn -ar 16000 -ac 1 {audio} -y",
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL
-            )
-            await proc.wait()
-
-            os.remove(video)
-
-            await status.edit("🤖 Transcribing...")
-
-            mdl = load_model()
-            seg_gen, _ = await asyncio.to_thread(mdl.transcribe, audio)
-            segments = list(seg_gen)
-
-            generate_sub(segments, sub, fmt)
-
-            await status.edit("⬆️ Uploading...")
-
-            await app.send_document(chat_id, sub, reply_to_message_id=msg_id)
-
-            await status.delete()
-
-        except Exception as e:
-            logger.error(e)
-            await status.edit("❌ Error")
-
-        finally:
-            for f in [video, audio, sub]:
-                if os.path.exists(f):
-                    os.remove(f)
-            gc.collect()
-
-# ================= COMMANDS =================
-@app.on_message(filters.command("start"))
+@app.on_message(filters.command("start") & filters.private)
 async def start(client, message):
-    await message.reply("✅ Bot Working!\nReply video with /srt or /vtt")
+    user_id = message.from_user.id
 
-@app.on_message(filters.command(["srt","vtt"]))
-async def add(client, message):
-    if not message.reply_to_message:
-        return await message.reply("Reply to video")
+    # USER TRACKING
+    try:
+        await client.send_message(LINK_DB_CHANNEL, f"USER:{user_id}")
+    except:
+        pass
 
-    task_queue.append({
-        "message": message,
-        "format": message.command[0]
-    })
+    # FORCE SUB
+    try:
+        await client.get_chat_member(FSUB_ID, user_id)
+    except UserNotParticipant:
+        btn = [[InlineKeyboardButton("📢 Join Channel", url=FSUB_LINK)]]
+        if len(message.command) > 1:
+            btn.append([InlineKeyboardButton("🔄 Try Again",
+                url=f"https://t.me/{(await client.get_me()).username}?start={message.command[1]}")])
+        return await message.reply("❌ Join channel first!", reply_markup=InlineKeyboardMarkup(btn))
 
-    await message.reply(f"✅ Added to queue ({len(task_queue)})")
+    if len(message.command) < 2:
+        return await message.reply(
+            "👋 Welcome!\nSend file to generate secure link.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🛠 Help", callback_data="help"),
+                 InlineKeyboardButton("📊 Stats", callback_data="stats")]
+            ])
+        )
 
-# ================= WEB =================
-async def health(request):
-    return web.Response(text="OK")
+    token = message.command[1]
 
-async def start_web():
-    app_web = web.Application()
-    app_web.router.add_get("/", health)
-    runner = web.AppRunner(app_web)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
+    # 🔥 FAST TOKEN FETCH (NO SEARCH)
+    try:
+        msg_id = int(token.split("_")[1])
+        mapping = await client.get_messages(LINK_DB_CHANNEL, msg_id)
+    except:
+        return await message.reply("❌ Invalid Link")
 
-# ================= MAIN =================
-async def main():
-    await app.start()
-    await start_web()
-    asyncio.create_task(worker())
-    print("BOT STARTED")
-    await idle()
+    if not mapping:
+        return await message.reply("❌ Link Expired")
+
+    try:
+        data = mapping.text.split("|")[1].strip()
+
+        # SINGLE FILE
+        if data.startswith("FILE:"):
+            file_id = int(data.split(":")[1])
+            file = await client.get_messages(DB_CHANNEL, file_id)
+            sent = await file.copy(message.chat.id)
+            asyncio.create_task(delete_after(sent, 120))
+
+        # BATCH
+        elif data.startswith("BATCH:"):
+            _, start, end = data.split(":")
+            start, end = int(start), int(end)
+
+            if end - start > 30:
+                return await message.reply("❌ Batch limit 30")
+
+            await message.reply("📦 Sending files...")
+            for i in range(start, end + 1):
+                try:
+                    f = await client.get_messages(DB_CHANNEL, i)
+                    s = await f.copy(message.chat.id)
+                    asyncio.create_task(delete_after(s, 600))
+                    await asyncio.sleep(1.2)
+                except FloodWait as e:
+                    await asyncio.sleep(e.value)
+                except:
+                    continue
+
+    except Exception as e:
+        logger.error(e)
+        await message.reply("❌ Error occurred")
+
+# --- GENERATE LINK ---
+
+@app.on_message((filters.document | filters.video | filters.audio | filters.photo) & filters.private)
+async def gen(client, message):
+    if message.from_user.id not in ADMINS:
+        return
+
+    db_msg = await message.copy(DB_CHANNEL)
+
+    # 🔥 TOKEN WITH MESSAGE ID (FAST)
+    log_msg = await client.send_message(LINK_DB_CHANNEL, f"TEMP")
+    token = f"t_{log_msg.id}"
+
+    await log_msg.edit(f"TOKEN:{token} | FILE:{db_msg.id}")
+
+    long_url = f"https://t.me/{(await client.get_me()).username}?start={token}"
+    short = await get_shortlink(long_url)
+
+    await message.reply(f"🔒 Link:\n{short}")
+
+# --- BATCH ---
+
+@app.on_message(filters.command("batch") & filters.private)
+async def batch(client, message):
+    if message.from_user.id not in ADMINS:
+        return
+
+    try:
+        start = int(message.command[1])
+        end = int(message.command[2])
+
+        if end - start > 30:
+            return await message.reply("❌ Max 30 files")
+
+        log_msg = await client.send_message(LINK_DB_CHANNEL, "TEMP")
+        token = f"t_{log_msg.id}"
+
+        await log_msg.edit(f"TOKEN:{token} | BATCH:{start}:{end}")
+
+        link = f"https://t.me/{(await client.get_me()).username}?start={token}"
+        short = await get_shortlink(link)
+
+        await message.reply(f"📦 Batch Link:\n{short}")
+
+    except:
+        await message.reply("Usage: /batch 100 120")
+
+# --- CALLBACK ---
+
+@app.on_callback_query()
+async def cb(client, query):
+    await query.answer()
+
+    if query.data == "help":
+        await query.message.reply("Click link → complete steps → get file")
+    elif query.data == "stats":
+        await query.message.reply("Bot running smooth 🚀")
+
+# --- START ---
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    Thread(target=run_web).start()
+    print("🔥 ELITE BOT V4 RUNNING")
+    app.run()
