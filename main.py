@@ -1,214 +1,191 @@
 import os
 import asyncio
 import aiohttp
-from pyrogram import Client, filters, enums
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+import json
+from pyrogram import Client, filters, enums, idle
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
 from flask import Flask
 from threading import Thread
 
-# --- WEB SERVER ---
+# --- WEB SERVER FOR RENDER ---
 web_app = Flask(__name__)
-
 @web_app.route('/')
-def health_check():
-    return "Bot is running perfectly!"
+def health_check(): return "Bot is Alive and Working!"
+def run_web(): web_app.run(host="0.0.0.0", port=10000)
 
-def run_web():
-    web_app.run(host="0.0.0.0", port=10000)
-
-# --- CONFIG ---
+# --- CONFIGURATION ---
 API_ID = int(os.environ.get("API_ID", "12345"))
 API_HASH = os.environ.get("API_HASH", "your_hash")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "your_token")
 
-OWNER_ID = int(os.environ.get("OWNER_ID", "5351848105"))
-ALLOWED_USERS = [int(x) for x in os.environ.get("ALLOWED_USERS", "5351848105,5344078567").split(",")]
-DB_CHANNEL = int(os.environ.get("DB_CHANNEL", "-1003143681742"))
-EXTRA_CHANNEL = int(os.environ.get("EXTRA_CHANNEL", "-1003872932495"))
+OWNER_ID = 5351848105
+ALLOWED_USERS = [5351848105, 5344078567]
+DB_CHANNEL = -1003143681742
+EXTRA_CHANNEL = -1003872932495 # Memory Channel
 
+app = Client("pro_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+# Global Memory
+shortener_db = [] 
 user_data = {}
-bot_settings = {
-    "shortener_api": os.environ.get("SHORT_API", ""),
-    "shortener_url": os.environ.get("SHORT_URL", ""),
-    "fsub_channels": [EXTRA_CHANNEL]
-}
 
-app = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# --- MEMORY FUNCTIONS (Using EXTRA_CHANNEL) ---
+async def save_settings():
+    data_str = f"#BOT_SETTINGS\n{json.dumps(shortener_db)}"
+    try:
+        async for msg in app.search_messages(EXTRA_CHANNEL, query="#BOT_SETTINGS"):
+            await msg.delete()
+        await app.send_message(EXTRA_CHANNEL, data_str)
+    except Exception as e: print(f"Save Error: {e}")
 
-# --- SHORTENER ---
-async def get_shortlink(long_url):
-    if not bot_settings["shortener_api"] or not bot_settings["shortener_url"]:
-        return long_url
+async def load_settings():
+    global shortener_db
+    try:
+        await app.get_chat(EXTRA_CHANNEL) # Resolve Channel
+        async for msg in app.search_messages(EXTRA_CHANNEL, query="#BOT_SETTINGS"):
+            if msg.text and "#BOT_SETTINGS" in msg.text:
+                content = msg.text.split("\n", 1)[1]
+                shortener_db = json.loads(content)
+                break
+    except Exception as e: print(f"Load Error: {e}")
 
-    domain = bot_settings["shortener_url"].lower()
-
-    if "gplinks" in domain:
-        api_url = f"https://api.gplinks.com/api?api={bot_settings['shortener_api']}&url={long_url}"
-    else:
-        api_url = f"https://{domain}/api?api={bot_settings['shortener_api']}&url={long_url}"
-
+# --- UTILS ---
+async def get_shortlink(url, site, api):
+    site_clean = site.replace("https://", "").replace("http://", "").split('/')[0]
+    api_url = f"https://{site_clean}/api?api={api}&url={url}"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(api_url) as res:
                 data = await res.json()
-                return (
-                    data.get("shortenedUrl")
-                    or data.get("short_url")
-                    or data.get("shortened_url")
-                    or data.get("url")
-                    or long_url
-                )
-    except:
-        return long_url
+                return data.get("shortenedUrl", url)
+    except: return url
 
 async def is_subscribed(user_id):
-    for chat_id in bot_settings["fsub_channels"]:
-        try:
-            member = await app.get_chat_member(chat_id, user_id)
-            if member.status == enums.ChatMemberStatus.LEFT:
-                return False
-        except:
-            continue
-    return True
+    try:
+        m = await app.get_chat_member(EXTRA_CHANNEL, user_id)
+        return m.status not in [enums.ChatMemberStatus.LEFT, enums.ChatMemberStatus.BANNED]
+    except: return False
 
-# --- START ---
-@app.on_message(filters.command("start") & filters.private)
-async def start_cmd(client, message):
-    if len(message.text.split()) > 1:
-        data = message.text.split()[1]
-        if not await is_subscribed(message.from_user.id):
-            btns = [[InlineKeyboardButton("Join Channel", url="https://t.me/your_channel_link")]]
-            return await message.reply("Pehle Join Karo!", reply_markup=InlineKeyboardMarkup(btns))
-
-        ids = data.split("_")
-        try:
-            if len(ids) == 1:
-                await client.copy_message(message.chat.id, DB_CHANNEL, int(ids[0]))
-            else:
-                for mid in range(int(ids[0]), int(ids[1]) + 1):
-                    await client.copy_message(message.chat.id, DB_CHANNEL, mid)
-                    await asyncio.sleep(0.5)
-        except Exception as e:
-            await message.reply(f"Error: {e}")
-        return
-    await message.reply("Bhai, post bhejo pehle!")
-
-# --- SETTINGS ---
+# --- SETTINGS & COMMANDS ---
 @app.on_message(filters.command("setting") & filters.user(ALLOWED_USERS))
-async def settings_cmd(client, message):
-    await message.reply("""
-⚙️ **Bot Commands**
+async def show_settings(c, m):
+    text = (
+        "**🛠 Bot Control Panel**\n\n"
+        "1. `/add_shortener` - Add Account\n"
+        "2. `/list_shortener` - Remove Account\n"
+        "3. `/select_admin_channel` - Leave Channel\n\n"
+        f"**Accounts Active:** `{len(shortener_db)}`"
+    )
+    await m.reply(text)
 
-/start - Bot start  
-/link - Link generate  
-/link_shortener - Shortener set  
-/setting - Commands list  
+@app.on_message(filters.command("add_shortener") & filters.user(ALLOWED_USERS))
+async def add_sh_start(c, m):
+    user_data[m.from_user.id] = {"state": "ADD_URL"}
+    await m.reply("Step 1: Website Domain bhejein (Example: `gplinks.com`):")
 
-**Setup:**
-1. Post bhejo  
-2. Link / Batch select karo  
-3. /link  
-4. Done → Number → Send  
+@app.on_message(filters.command("list_shortener") & filters.user(ALLOWED_USERS))
+async def list_sh(c, m):
+    if not shortener_db: return await m.reply("No accounts found.")
+    for i, sh in enumerate(shortener_db):
+        btn = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Remove", callback_data=f"rem_{i}")]])
+        await m.reply(f"📍 Account {i+1}:\nURL: `{sh['url']}`", reply_markup=btn)
 
-🔥 Ready!
-""")
+@app.on_callback_query(filters.regex("rem_"))
+async def rem_sh_cb(c, q):
+    shortener_db.pop(int(q.data.split("_")[1]))
+    await save_settings()
+    await q.message.edit("✅ Account removed!")
 
-# --- SHORTENER SETUP ---
-@app.on_message(filters.command("link_shortener") & filters.user(ALLOWED_USERS))
-async def shortener_setup(client, message):
-    uid = message.from_user.id
-    user_data.setdefault(uid, {})
-    user_data[uid]["state"] = "set_url"
-    await message.reply("Shortener domain bhejo (e.g. gplinks.com):")
+# --- INPUT HANDLERS (Priority to avoid post conflict) ---
+@app.on_message(filters.private & filters.user(ALLOWED_USERS), group=-1)
+async def inputs(c, m: Message):
+    uid = m.from_user.id
+    state = user_data.get(uid, {}).get("state")
+    if not state: return
 
-# --- MESSAGE HANDLER (Combined Post & Input Handler) ---
-@app.on_message(filters.user(ALLOWED_USERS) & filters.private & ~filters.command(["start","link","link_shortener","setting"]))
-async def process_all_messages(client, message):
-    uid = message.from_user.id
+    if state == "ADD_URL":
+        user_data[uid]["new_url"] = m.text.strip().replace("https://", "").replace("http://", "").split('/')[0]
+        user_data[uid]["state"] = "ADD_API"
+        await m.reply("Now send **API Token**:")
+        m.stop_propagation()
+    elif state == "ADD_API":
+        shortener_db.append({"url": user_data[uid]["new_url"], "api": m.text.strip()})
+        await save_settings()
+        user_data[uid] = {}
+        await m.reply("✅ Saved in Memory!")
+        m.stop_propagation()
+    elif state == "WAIT_NUM":
+        user_data[uid]["num"] = m.text
+        btns = [[InlineKeyboardButton(sh['url'], callback_data=f"use_{i}")] for i, sh in enumerate(shortener_db)]
+        if not btns: await m.reply("Add a shortener first!")
+        else: await m.reply("Select Shortener Account:", reply_markup=InlineKeyboardMarkup(btns))
+        user_data[uid]["state"] = None
+        m.stop_propagation()
 
-    # 1. Pehle check karte hain ki user link shortener ya episode set toh nahi kar raha (State check)
-    if uid in user_data and user_data[uid].get("state"):
-        state = user_data[uid].get("state")
+# --- FILE CAPTURE ---
+@app.on_message(filters.private & filters.user(ALLOWED_USERS) & filters.forwarded)
+async def capture(c, m: Message):
+    uid = m.from_user.id
+    state = user_data.get(uid, {}).get("state")
+    if not state or m.forward_from_chat.id != DB_CHANNEL: return
 
-        if state == "set_url":
-            bot_settings["shortener_url"] = message.text.strip().replace("https://","").replace("/","")
-            user_data[uid]["state"] = "set_api"
-            await message.reply("API Token bhejo:")
-            return
+    if state == "WAIT_S":
+        user_data[uid]["fid"], user_data[uid]["state"] = m.forward_from_message_id, "WAIT_NUM"
+        await m.reply("File OK! Now enter Episode Number:")
+    elif state == "WAIT_START":
+        user_data[uid]["sid"], user_data[uid]["state"] = m.forward_from_message_id, "WAIT_END"
+        await m.reply("Start OK! Now forward **End File**:")
+    elif state == "WAIT_END":
+        user_data[uid]["eid"], user_data[uid]["state"] = m.forward_from_message_id, "WAIT_NUM"
+        await m.reply("End OK! Now enter Number/Range (e.g. 01-10):")
 
-        elif state == "set_api":
-            bot_settings["shortener_api"] = message.text.strip()
-            user_data[uid]["state"] = None
-            await message.reply("✅ Shortener Set Ho Gya!")
-            return
+# --- POST HANDLER ---
+@app.on_message(filters.private & filters.user(ALLOWED_USERS))
+async def handle_post(c, m: Message):
+    if m.text and m.text.startswith("/"): return
+    user_data[m.from_user.id] = {"post": m, "selected_chats": []}
+    btns = [[InlineKeyboardButton("Link", callback_data="s_mode"), InlineKeyboardButton("Batch", callback_data="b_mode")]]
+    await m.reply("Post detected. Mode select karein:", reply_markup=InlineKeyboardMarkup(btns))
 
-        elif state == "waiting_num":
-            num = message.text
-            bot_user = (await client.get_me()).username
-            f_link = f"https://t.me/{bot_user}?start=file_id_here"
-            
-            s_link = await get_shortlink(f_link)
+@app.on_callback_query()
+async def callbacks(c, q: CallbackQuery):
+    uid = q.from_user.id
+    data = q.data
 
-            markup = InlineKeyboardMarkup([[InlineKeyboardButton(f"Episode {num}", url=s_link)]])
-            user_data[uid]["final_markup"] = markup
+    if data == "s_mode":
+        user_data[uid]["mode"], user_data[uid]["state"] = "s", "WAIT_S"
+        await q.message.edit("Forward file from DB.")
+    elif data == "b_mode":
+        user_data[uid]["mode"], user_data[uid]["state"] = "b", "WAIT_START"
+        await q.message.edit("Forward Start file.")
+    elif data.startswith("use_"):
+        sh = shortener_db[int(data.split("_")[1])]
+        await q.message.edit("⚡ Generating Link...")
+        path = f"{user_data[uid]['fid']}" if user_data[uid]["mode"] == "s" else f"{user_data[uid]['sid']}_{user_data[uid]['eid']}"
+        bot_un = (await c.get_me()).username
+        short_url = await get_shortlink(f"https://t.me/{bot_un}?start={path}", sh['url'], sh['api'])
+        user_data[uid]["markup"] = InlineKeyboardMarkup([[InlineKeyboardButton(f"Episode {user_data[uid]['num']}", url=short_url)]])
+        btns = [[InlineKeyboardButton(d.chat.title, callback_data=f"tr_{d.chat.id}")] async for d in c.get_dialogs() if d.chat.type in [enums.ChatType.CHANNEL, enums.ChatType.SUPERGROUP]]
+        btns.append([InlineKeyboardButton("🚀 SEND", callback_data="push")])
+        await q.message.edit("Select Channels:", reply_markup=InlineKeyboardMarkup(btns))
+    elif data.startswith("tr_"):
+        cid = int(data.split("_")[1])
+        if cid not in user_data[uid]["selected_chats"]: user_data[uid]["selected_chats"].append(cid)
+        else: user_data[uid]["selected_chats"].remove(cid)
+        await q.answer("Updated")
+    elif data == "push":
+        for cid in user_data[uid]["selected_chats"]:
+            try: await user_data[uid]["post"].copy(cid, reply_markup=user_data[uid]["markup"])
+            except: pass
+        await q.message.edit("✅ Mission Accomplished!")
 
-            btns = [[InlineKeyboardButton("Send to Channel", callback_data="send_now")]]
-            await message.reply("Done dabao:", reply_markup=InlineKeyboardMarkup(btns))
-            return
-
-    # 2. Agar koi state active nahi hai, toh iska matlab user ne nai post bheji hai
-    if message.text or message.caption or message.photo or message.video or message.document:
-        user_data[uid] = {"post": message, "selected_chats": []}
-
-        btns = [[
-            InlineKeyboardButton("Link", callback_data="set_single"),
-            InlineKeyboardButton("Batch Link", callback_data="set_batch")
-        ]]
-        await message.reply("Option select karo:", reply_markup=InlineKeyboardMarkup(btns))
-
-# --- CALLBACK FIXED ---
-@app.on_callback_query(filters.regex("^(set_single|set_batch|sel_)"))
-async def callbacks(client, query):
-    uid = query.from_user.id
-    data = query.data
-
-    if data == "set_single":
-        user_data[uid]["mode"] = "single"
-        await query.message.edit("Database se 1 episode forward karo, fir /link command do.")
-
-    elif data == "set_batch":
-        user_data[uid]["mode"] = "batch"
-        await query.message.edit("Start & End episode forward karo, fir /link command do.")
-
-    elif data.startswith("sel_"):
-        chat_id = int(data.split("_")[1])
-        user_data[uid]["selected_chats"].append(chat_id)
-        await query.answer("Added!")
-
-# --- LINK ---
-@app.on_message(filters.command("link") & filters.user(ALLOWED_USERS))
-async def get_link_command(client, message):
-    await message.reply("Done pe click karein", reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("Done", callback_data="gen_link")]
-    ]))
-
-@app.on_callback_query(filters.regex("gen_link"))
-async def generate_final_step(client, query):
-    uid = query.from_user.id
-    user_data[uid]["state"] = "waiting_num"
-    await query.message.edit("Episode Number daalo:")
-
-# --- FINAL SEND ---
-@app.on_callback_query(filters.regex("send_now"))
-async def final_send(client, query):
-    uid = query.from_user.id
-    post = user_data[uid]["post"]
-    markup = user_data[uid]["final_markup"]
-
-    await post.copy(DB_CHANNEL, reply_markup=markup)
-    await query.message.edit("Post send ho gaya ✅")
-
-# --- RUN ---
-if __name__ == "__main__":
+# --- STARTUP ---
+async def boot():
     Thread(target=run_web).start()
-    app.run()
+    await app.start()
+    await load_settings()
+    print("Bot is Live!")
+    await idle()
+
+if __name__ == "__main__":
+    asyncio.get_event_loop().run_until_complete(boot())
