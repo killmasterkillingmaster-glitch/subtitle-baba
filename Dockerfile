@@ -1,13 +1,32 @@
-FROM python:3.10-slim
+# Use official Python slim image
+FROM python:3.11-slim
 
+# --- ENVIRONMENT VARIABLES ---
+ENV PYTHONUNBUFFERED=1 \
+    PORT=10000
+
+# --- SYSTEM DEPENDENCIES ---
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    build-essential \
+    libsndfile1 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- WORKDIR ---
 WORKDIR /app
 
-COPY requirements.txt requirements.txt
-RUN pip3 install --no-cache-dir -r requirements.txt
+# --- COPY REQUIREMENTS ---
+COPY requirements.txt .
 
+# --- INSTALL PYTHON DEPENDENCIES ---
+RUN pip install --no-cache-dir -r requirements.txt
+
+# --- COPY BOT CODE ---
 COPY . .
 
-# Render ke liye port expose karna zaroori hai
+# --- EXPOSE PORT FOR WEB SERVER ---
 EXPOSE 10000
 
-CMD ["python3", "main.py"]
+# --- ENTRYPOINT ---
+CMD ["python", "main.py"]
