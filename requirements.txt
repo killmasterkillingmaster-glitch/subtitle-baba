@@ -1,6 +1,6 @@
 pyrogram
 tgcrypto
-Flask
-pymongo
+motor
+pyromod
 aiohttp
 python-dotenv
