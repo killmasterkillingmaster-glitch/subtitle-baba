@@ -1,6 +1,6 @@
 pyrogram
 tgcrypto
-aiohttp
-Flask
-pymongo
 motor
+flask
+aiohttp
+dnspython
