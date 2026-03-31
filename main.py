@@ -1,234 +1,198 @@
 import os
 import asyncio
 import aiohttp
-from pyrogram import Client, filters, enums
+from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from motor.motor_asyncio import AsyncIOMotorClient
 from flask import Flask
 from threading import Thread
 
-# --- WEB SERVER (For Render Free Tier) ---
+# ---------------- WEB ----------------
 web_app = Flask(__name__)
 
 @web_app.route('/')
-def health_check():
-    return "Bot is running perfectly on Render!"
+def home():
+    return "Bot Running 🔥"
 
 def run_web():
     web_app.run(host="0.0.0.0", port=10000)
 
-# --- CONFIG ---
-API_ID = int(os.environ.get("API_ID", "12345"))
-API_HASH = os.environ.get("API_HASH", "your_hash")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "your_token")
+# ---------------- CONFIG ----------------
+API_ID = int(os.environ.get("API_ID"))
+API_HASH = os.environ.get("API_HASH")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-OWNER_ID = int(os.environ.get("OWNER_ID", "5351848105"))
-ALLOWED_USERS = [int(x) for x in os.environ.get("ALLOWED_USERS", "5351848105,5344078567").split(",")]
-DB_CHANNEL = int(os.environ.get("DB_CHANNEL", "-1003143681742"))
-EXTRA_CHANNEL = int(os.environ.get("EXTRA_CHANNEL", "-1003872932495"))
+OWNER_ID = int(os.environ.get("OWNER_ID"))
+DB_CHANNEL = int(os.environ.get("DB_CHANNEL"))
 
-user_data = {}
-bot_settings = {
-    "shortener_api": os.environ.get("SHORT_API", ""),
-    "shortener_url": os.environ.get("SHORT_URL", ""),
-    "fsub_channels": [EXTRA_CHANNEL]
-}
+MONGO_URI = os.environ.get("MONGO_URI")
 
-app = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# ---------------- DB ----------------
+mongo = AsyncIOMotorClient(MONGO_URI)
+db = mongo.bot
+settings_db = db.settings
 
-# --- SHORTENER LOGIC ---
-async def get_shortlink(long_url):
-    if not bot_settings["shortener_api"] or not bot_settings["shortener_url"]:
-        return long_url
+# ---------------- BOT ----------------
+app = Client("bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-    domain = bot_settings["shortener_url"].lower()
+user_state = {}
 
-    if "gplinks" in domain:
-        api_url = f"https://api.gplinks.com/api?api={bot_settings['shortener_api']}&url={long_url}"
-    else:
-        api_url = f"https://{domain}/api?api={bot_settings['shortener_api']}&url={long_url}"
+# ---------------- SHORTENER ----------------
+async def get_shortener():
+    data = await settings_db.find_one({"_id": "shortener"})
+    if data:
+        return data.get("api"), data.get("url")
+    return None, None
+
+async def short_link(url):
+    api, domain = await get_shortener()
+
+    if not api or not domain:
+        return url
+
+    link = f"https://{domain}/api?api={api}&url={url}"
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(api_url) as res:
-                data = await res.json()
-                return (
-                    data.get("shortenedUrl")
-                    or data.get("short_url")
-                    or data.get("shortened_url")
-                    or data.get("url")
-                    or long_url
-                )
+        async with aiohttp.ClientSession() as s:
+            async with s.get(link) as r:
+                data = await r.json()
+                return data.get("shortenedUrl") or data.get("short_url") or url
     except:
-        return long_url
+        return url
 
-async def is_subscribed(user_id):
-    for chat_id in bot_settings["fsub_channels"]:
-        try:
-            member = await app.get_chat_member(chat_id, user_id)
-            if member.status == enums.ChatMemberStatus.LEFT:
-                return False
-        except:
-            continue
-    return True
-
-# --- START COMMAND ---
-@app.on_message(filters.command("start") & filters.private)
-async def start_cmd(client, message):
-    if len(message.text.split()) > 1:
-        data = message.text.split()[1]
-        if not await is_subscribed(message.from_user.id):
-            btns = [[InlineKeyboardButton("Join Channel", url="https://t.me/your_channel_link")]]
-            return await message.reply("Pehle Channel Join Karo!", reply_markup=InlineKeyboardMarkup(btns))
-
+# ---------------- START ----------------
+@app.on_message(filters.command("start"))
+async def start(client, message):
+    if len(message.command) > 1:
+        data = message.command[1]
         ids = data.split("_")
-        try:
-            if len(ids) == 1:
-                await client.copy_message(message.chat.id, DB_CHANNEL, int(ids[0]))
-            else:
-                for mid in range(int(ids[0]), int(ids[1]) + 1):
-                    await client.copy_message(message.chat.id, DB_CHANNEL, mid)
-                    await asyncio.sleep(0.5)
-        except Exception as e:
-            await message.reply(f"Error: {e}")
-        return
-    await message.reply("Bhai, main zinda hu! Commands dekhne ke liye /setting dabao.")
 
-# --- SETTINGS COMMAND ---
-@app.on_message(filters.command("setting") & filters.user(ALLOWED_USERS))
-async def settings_cmd(client, message):
-    await message.reply("""
-⚙️ **Bot Commands & Settings**
+        if len(ids) == 1:
+            await client.copy_message(message.chat.id, DB_CHANNEL, int(ids[0]))
+        else:
+            for i in range(int(ids[0]), int(ids[1]) + 1):
+                await client.copy_message(message.chat.id, DB_CHANNEL, i)
+                await asyncio.sleep(0.3)
+    else:
+        await message.reply("Bot Alive 🔥")
 
-/post - Naya post daalne ke liye (Pehle ye dabayein)
-/link_shortener - Link shortener Setup karne ke liye
-/link - Link generate karne ka final step
-/setting - Commands ki list dekhne ke liye
+# ---------------- POST ----------------
+@app.on_message(filters.command("post") & filters.user(OWNER_ID))
+async def post(client, message):
+    user_state[message.from_user.id] = {"state": "post"}
+    await message.reply("📤 Post bhejo (photo/video/text)")
 
-**📌 Setup Kaise Karein:**
-1️⃣ `/link_shortener` send karein aur domain + API set karein.
-2️⃣ `/post` send karein, fir apna Post (Photo/Video/Text) bhejein.
-3️⃣ Link / Batch Link ka option select karein.
-4️⃣ Database se files forward karein.
-5️⃣ `/link` command de kar Done karein aur Episode Number daalein.
+# ---------------- SHORTENER SET ----------------
+@app.on_message(filters.command("shortener") & filters.user(OWNER_ID))
+async def set_shortener(client, message):
+    user_state[message.from_user.id] = {"state": "set_domain"}
+    await message.reply("🌐 Domain bhejo (example: gplinks.com)")
 
-🔥 Ready to use!
-""")
+# ---------------- DONE ----------------
+@app.on_message(filters.command("done") & filters.user(OWNER_ID))
+async def done(client, message):
+    user_state[message.from_user.id]["state"] = "number"
+    await message.reply("🔢 Episode number bhejo")
 
-# --- NEW: POST COMMAND (Fixes the overlapping issue) ---
-@app.on_message(filters.command("post") & filters.user(ALLOWED_USERS) & filters.private)
-async def post_command(client, message):
+# ---------------- HANDLER ----------------
+@app.on_message(filters.private & filters.user(OWNER_ID))
+async def handler(client, message):
     uid = message.from_user.id
-    user_data.setdefault(uid, {})
-    user_data[uid]["state"] = "waiting_for_post"
-    await message.reply("📸 Apna Post (Photo, Video, ya Text) bhejo jiske niche tumhe button lagana hai:")
 
-# --- SHORTENER SETUP COMMAND ---
-@app.on_message(filters.command("link_shortener") & filters.user(ALLOWED_USERS))
-async def shortener_setup(client, message):
-    uid = message.from_user.id
-    user_data.setdefault(uid, {})
-    user_data[uid]["state"] = "set_url"
-    await message.reply("🌐 Shortener ka Domain bhejo (e.g., gplinks.com ya modijiurl.com):")
-
-# --- LINK COMMAND ---
-@app.on_message(filters.command("link") & filters.user(ALLOWED_USERS))
-async def get_link_command(client, message):
-    await message.reply("Agar file forward kar di hai toh Done pe click karein:", reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Done", callback_data="gen_link")]
-    ]))
-
-# --- MASTER INPUT HANDLER (Handles Post, URL, API, and Episode Number) ---
-@app.on_message(filters.private & filters.user(ALLOWED_USERS) & ~filters.command(["start","link","link_shortener","setting","post"]))
-async def master_input_handler(client, message):
-    uid = message.from_user.id
-    if uid not in user_data:
+    if uid not in user_state:
         return
 
-    state = user_data[uid].get("state")
+    state = user_state[uid]["state"]
 
-    # 1. Handling the Post
-    if state == "waiting_for_post":
-        user_data[uid]["post"] = message
-        user_data[uid]["selected_chats"] = []
-        user_data[uid]["state"] = None # State clear kar diya
+    # POST SAVE
+    if state == "post":
+        user_state[uid]["post"] = message
+        user_state[uid]["files"] = []
+        user_state[uid]["state"] = "mode"
 
-        btns = [[
-            InlineKeyboardButton("Single Link", callback_data="set_single"),
-            InlineKeyboardButton("Batch Link", callback_data="set_batch")
+        btn = [[
+            InlineKeyboardButton("Single", callback_data="single"),
+            InlineKeyboardButton("Batch", callback_data="batch")
         ]]
-        await message.reply("✅ Post save ho gaya! Ab option select karo:", reply_markup=InlineKeyboardMarkup(btns))
+        await message.reply("Select mode", reply_markup=InlineKeyboardMarkup(btn))
 
-    # 2. Handling Shortener URL
-    elif state == "set_url":
-        if not message.text:
-            return await message.reply("Bhai text format me URL bhejo!")
-        bot_settings["shortener_url"] = message.text.strip().replace("https://","").replace("http://","").replace("/","")
-        user_data[uid]["state"] = "set_api"
-        await message.reply(f"Domain set: `{bot_settings['shortener_url']}`\n\nAb API Token bhejo:")
+    # FILE SAVE
+    elif message.forward_from_chat and message.forward_from_chat.id == DB_CHANNEL:
+        user_state[uid]["files"].append(message.forward_from_message_id)
+        await message.reply(f"✅ Saved: {message.forward_from_message_id}")
 
-    # 3. Handling Shortener API
-    elif state == "set_api":
-        if not message.text:
-            return await message.reply("Bhai text format me API bhejo!")
-        bot_settings["shortener_api"] = message.text.strip()
-        user_data[uid]["state"] = None # State clear
-        await message.reply("✅ Shortener successfully Set Ho Gya hai!")
-
-    # 4. Handling Episode Number
-    elif state == "waiting_num":
-        if not message.text:
-            return await message.reply("Number bhejo!")
+    # EPISODE NUMBER
+    elif state == "number":
         num = message.text
+        files = user_state[uid]["files"]
 
-        bot_user = (await client.get_me()).username
-        # Yahan tumhara file_id ka logic aayega (abhi dummy start parameter hai)
-        f_link = f"https://t.me/{bot_user}?start=file_id_here" 
-        
-        await message.reply("⏳ Shortlink generate ho raha hai, wait...")
-        s_link = await get_shortlink(f_link)
+        if not files:
+            return await message.reply("❌ Pehle file forward karo")
 
-        markup = InlineKeyboardMarkup([[InlineKeyboardButton(f"Episode {num}", url=s_link)]])
-        user_data[uid]["final_markup"] = markup
-        user_data[uid]["state"] = None # State clear
+        bot_user = (await app.get_me()).username
 
-        btns = [[InlineKeyboardButton("🚀 Send to Channel", callback_data="send_now")]]
-        await message.reply("Sab set hai! Button daba ke channel me bhejo:", reply_markup=InlineKeyboardMarkup(btns))
+        if user_state[uid]["mode"] == "single":
+            param = str(files[0])
+        else:
+            param = f"{files[0]}_{files[-1]}"
 
-# --- CALLBACKS (Buttons) ---
-@app.on_callback_query(filters.regex("^(set_single|set_batch|sel_|gen_link|send_now)"))
-async def callbacks(client, query):
+        link = f"https://t.me/{bot_user}?start={param}"
+        short = await short_link(link)
+
+        btn = [[InlineKeyboardButton(f"Episode {num}", url=short)]]
+
+        user_state[uid]["markup"] = InlineKeyboardMarkup(btn)
+        user_state[uid]["state"] = "send"
+
+        send_btn = [[InlineKeyboardButton("🚀 Send", callback_data="send")]]
+        await message.reply("Ready 🚀", reply_markup=InlineKeyboardMarkup(send_btn))
+
+    # SET DOMAIN
+    elif state == "set_domain":
+        user_state[uid]["domain"] = message.text.strip().replace("https://", "").replace("/", "")
+        user_state[uid]["state"] = "set_api"
+        await message.reply("🔑 API bhejo")
+
+    # SET API
+    elif state == "set_api":
+        domain = user_state[uid]["domain"]
+        api = message.text.strip()
+
+        await settings_db.update_one(
+            {"_id": "shortener"},
+            {"$set": {"url": domain, "api": api}},
+            upsert=True
+        )
+
+        user_state[uid]["state"] = None
+        await message.reply("✅ Shortener set ho gaya")
+
+# ---------------- CALLBACK ----------------
+@app.on_callback_query()
+async def cb(client, query):
     uid = query.from_user.id
+
+    if uid not in user_state:
+        return
+
     data = query.data
 
-    if data == "set_single":
-        user_data[uid]["mode"] = "single"
-        await query.message.edit("Database channel se 1 episode bot me forward karo, fir `/link` command do.")
+    if data == "single":
+        user_state[uid]["mode"] = "single"
+        await query.message.edit("1 file forward karo phir /done")
 
-    elif data == "set_batch":
-        user_data[uid]["mode"] = "batch"
-        await query.message.edit("Start & End episode bot me forward karo, fir `/link` command do.")
+    elif data == "batch":
+        user_state[uid]["mode"] = "batch"
+        await query.message.edit("multiple files forward karo phir /done")
 
-    elif data.startswith("sel_"):
-        chat_id = int(data.split("_")[1])
-        user_data[uid]["selected_chats"].append(chat_id)
-        await query.answer("Channel Added!")
-
-    elif data == "gen_link":
-        user_data[uid]["state"] = "waiting_num"
-        await query.message.edit("📝 Button me likhne ke liye Episode Number daalo (e.g. 1, 2, 3):")
-
-    elif data == "send_now":
-        post = user_data[uid].get("post")
-        markup = user_data[uid].get("final_markup")
-        
-        if not post or not markup:
-            return await query.answer("Error: Data lost! Wapis /post se start karo.", show_alert=True)
+    elif data == "send":
+        post = user_state[uid]["post"]
+        markup = user_state[uid]["markup"]
 
         await post.copy(DB_CHANNEL, reply_markup=markup)
-        await query.message.edit("🎉 Post successfully channel me send ho gaya!")
+        await query.message.edit("✅ Posted")
 
-# --- RUN ---
+# ---------------- RUN ----------------
 if __name__ == "__main__":
     Thread(target=run_web).start()
-    print("Bot Started...")
     app.run()
