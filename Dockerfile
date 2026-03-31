@@ -10,11 +10,11 @@ COPY requirements.txt .
 # Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy all code
+# Copy source code
 COPY . .
 
-# Expose port for Flask health check
+# Expose port (Render or local)
 EXPOSE 10000
 
-# Run the bot
+# Run bot
 CMD ["python", "main.py"]
