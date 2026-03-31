@@ -1,6 +1,4 @@
-pyrogram
+pyrogram>=2.0
 tgcrypto
-motor
-pyromod
+faster_whisper
 aiohttp
-dnspython
