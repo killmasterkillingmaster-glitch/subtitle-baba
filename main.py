@@ -113,7 +113,6 @@ async def start_cmd(client, message):
 
         if not is_premium and not payload.startswith("verify_"):
             # Ager premium nahi hai to pehle shortener dena hai
-            # Hum ek verify link banayenge taaki jab wo shortener solve karke aaye to detect ho
             bot_username = client.me.username
             verify_url = f"https://t.me/{bot_username}?start=verify_{payload}"
             short_url = await get_shortlink(verify_url)
@@ -197,7 +196,7 @@ async def remove_premium(client, message):
     
     await premium_db.update_one(
         {"user_id": target_id},
-        {"$set": {"is_banned": True}} # Ban the user permanently
+        {"$set": {"is_banned": True}} 
     )
     await message.reply("Bot reply - successfully deleted and ban")
 
@@ -234,18 +233,14 @@ async def force_sub(client, message):
 async def post_workflow(client, message):
     if not is_admin(message.from_user.id): return
     
-    # 02 Bot reply - send post
     post_msg = await client.ask(message.chat.id, "Bot reply - send post")
     
-    # Bot reply - Please provide single link or batch link
     link_type_msg = await client.ask(message.chat.id, "Bot reply - post successfully received\nPlease provide single link or batch link (Type 'single link' or 'batch link')")
     
     msg_ids = []
     
     if link_type_msg.text.lower() == "single link":
         ep_msg = await client.ask(message.chat.id, "Bot reply - send episode (Forward from database)")
-        # Save to storage (if not already there) or just get ID. 
-        # For safety, we forward it to STORAGE_CHANNEL_ID
         copied = await ep_msg.copy(STORAGE_CHANNEL_ID)
         msg_ids.append(copied.id)
         
@@ -256,30 +251,22 @@ async def post_workflow(client, message):
         last_ep = await client.ask(message.chat.id, "Bot reply - send next episode (Last episode)")
         copied_last = await last_ep.copy(STORAGE_CHANNEL_ID)
         
-        # Add all message IDs between first and last (assuming sequential in DB)
-        # Actually in TG, forwarded messages don't retain sequence. Users forward them.
-        # But we copied them to DB. We will provide range
         start_id = min(copied_first.id, copied_last.id)
         end_id = max(copied_first.id, copied_last.id)
         msg_ids = list(range(start_id, end_id + 1))
         
         await message.reply("Bot reply - batch successfully adding")
 
-    # Bot Reply - Enter Number
     num_msg = await client.ask(message.chat.id, "Bot Reply - Enter Number (e.g., 07 or 05 - 15)")
     ep_num = num_msg.text
     
-    # Bot reply - confirm
     confirm_msg = await client.ask(message.chat.id, "Bot reply - /confirm")
     if confirm_msg.text != "/confirm": return
     
-    # Bot reply - /hmm wait
     hmm_msg = await client.ask(message.chat.id, "Send /hmm")
     if hmm_msg.text != "/hmm": return
     
-    # Create DB Entry for File Links
-    import string
-    import random
+    import string, random
     unique_hash = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
     await files_db.insert_one({"hash": unique_hash, "msg_ids": msg_ids})
     
@@ -288,40 +275,58 @@ async def post_workflow(client, message):
     
     btn = InlineKeyboardMarkup([[InlineKeyboardButton(f"Watch episode {ep_num}", url=button_url)]])
     
-    # Send Post preview back to User
+    # User ko button ke sath post preview dikhana
     preview = await post_msg.copy(message.chat.id, reply_markup=btn)
     
-    # Ask for broadcasting
+    # ================== AUTO DETECT CHANNELS LOGIC ==================
+    await message.reply("🔄 Fetching channels where I am an admin... Please wait.")
+    
+    channels = []
+    async for dialog in client.get_dialogs():
+        if dialog.chat.type == enums.ChatType.CHANNEL:
+            # Storage channel me wapas post nahi dalni, usko ignore kar rahe hain
+            if dialog.chat.id == STORAGE_CHANNEL_ID:
+                continue
+            # Channel naam aur ID save kar lena
+            channels.append({"name": dialog.chat.title or "Unknown Channel", "id": dialog.chat.id})
+            
+    if not channels:
+        return await message.reply("⚠️ You haven't added me as an admin to any channel yet. Please add me to your channels first.")
+    # =================================================================
+
     send_type = await client.ask(message.chat.id, "Bot uske baad reply dega\nType /send OR /send more channel")
     
-    channels = [{"name": "Hindi sub anime", "id": -1001234567890}, {"name": "Gyaani baba", "id": -1009876543210}] 
-    # NOTE: Yaha channel dictionary me apne actual channel ID dalna hoga jaha bot admin hai.
-    # Abhi ke liye ye demo list banayi hai. Aap isko DB me add karwa sakte ho force_sub ki tarah.
-    
+    selected = []
     if send_type.text == "/send":
         ch_text = "Select 1 Channel:\n"
         for i, ch in enumerate(channels):
             ch_text += f"{i}. {ch['name']}\n"
         sel_ch = await client.ask(message.chat.id, ch_text + "\nEnter Number:")
-        selected = [channels[int(sel_ch.text)]]
-        
+        try:
+            selected = [channels[int(sel_ch.text.strip())]]
+        except (ValueError, IndexError):
+            return await message.reply("Invalid selection. Process cancelled.")
+            
     elif send_type.text == "/send more channel":
         ch_text = "Select Channels (comma separated, e.g. 0, 1):\n"
         for i, ch in enumerate(channels):
             ch_text += f"{i}. {ch['name']}\n"
-        sel_ch = await client.ask(message.chat.id, ch_text + "\nEnter Numbers:")
-        indexes = [int(x.strip()) for x in sel_ch.text.split(",")]
-        selected = [channels[i] for i in indexes]
+        sel_ch = await client.ask(message.chat.id, ch_text + "\nEnter Numbers (example: 0, 2):")
+        try:
+            indexes = [int(x.strip()) for x in sel_ch.text.split(",")]
+            selected = [channels[i] for i in indexes]
+        except (ValueError, IndexError):
+            return await message.reply("Invalid selection. Process cancelled.")
         
     fin_confirm = await client.ask(message.chat.id, "Bot reply - confirm please (Type /confirm)")
     if fin_confirm.text == "/confirm":
         for ch in selected:
             try:
-                # Update this line to use your real channel IDs 
-                # e.g., await preview.copy(ch['id'], reply_markup=btn)
-                await message.reply(f"Post successful to {ch['name']} (Demo mode - update channel IDs in code)")
+                # Actual post channel me ja rahi hai yaha se
+                await preview.copy(ch['id'], reply_markup=btn)
+                await message.reply(f"✅ Post successfully sent to {ch['name']}")
             except Exception as e:
-                await message.reply(f"Error posting to {ch['name']}: {e}")
+                await message.reply(f"❌ Error posting to {ch['name']}: {e}")
 
 # ================= STARTING BOT & SERVER =================
 async def main():
