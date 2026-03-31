@@ -1,20 +1,15 @@
 # Base image
-FROM python:3.11-slim
+FROM python:3.10-slim
 
-# Set working directory
+# Set Working directory
 WORKDIR /app
 
-# Copy requirements
+# Copy requirements and install dependencies
 COPY requirements.txt .
-
-# Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy source code
+# Copy all the remaining files to container
 COPY . .
 
-# Expose port (Render or local)
-EXPOSE 10000
-
-# Run bot
+# Run the python script
 CMD ["python", "main.py"]
