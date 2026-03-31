@@ -18,12 +18,13 @@ ALLOWED_GROUP = -1003899919015
 # Port automatically fetch hoga hosting se, warna 8080 use karega
 PORT = int(os.environ.get("PORT", 8080))
 
-# API credentials via environment variables (secure)
+# API credentials via environment variables
 API_ID = int(os.environ.get("API_ID", "123456"))
 API_HASH = os.environ.get("API_HASH", "abcdef123456")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "123456:ABCDEF")
 
 # ---------------- MONGO SETUP (Async Motor) ----------------
+# Aapki request ke anusar MongoDB URI code me hi hai
 MONGO_URI = "mongodb+srv://aasifhusenaasifkhan_db_user:64CtKuQjWL0EzYMO@botcluster.v4land1.mongodb.net/?retryWrites=true&w=majority"
 DB_NAME = "subtitle_baba"
 
