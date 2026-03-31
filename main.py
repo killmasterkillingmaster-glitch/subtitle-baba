@@ -1,50 +1,38 @@
-import os
-from pyrogram import Client, filters
-from flask import Flask
-from threading import Thread
+import asyncio
+from aiohttp import web
+from pyrogram import Client
 from config import API_ID, API_HASH, BOT_TOKEN, PORT
 
-# --- WEB SERVER FOR RENDER ---
-web_app = Flask(__name__)
+# Basic web server route
+async def handle_ping(request):
+    return web.Response(text="Bot is running!")
 
-@web_app.route('/')
-def health_check():
-    return "Bot is running perfectly!"
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    print(f"Web server started on port {PORT}")
 
-def run_web():
-    web_app.run(host="0.0.0.0", port=PORT)
-
-# --- TELEGRAM BOT ---
+# Pyrogram Client
 bot = Client(
-    "hmm_bot",
+    "AnimeBot",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN
+    bot_token=BOT_TOKEN,
+    plugins=dict(root="plugins") # Yeh jaruri hai taki plugins folder load ho
 )
 
-# --- Basic Commands ---
-@bot.on_message(filters.command("start") & filters.private)
-async def start(client, message):
-    await message.reply_text(
-        f"Hello 🤗 Welcome to HMM Bot!\nOwner: {os.getenv('OWNER_ID')}"
-    )
+async def main():
+    await start_web_server()
+    print("Starting Telegram Bot...")
+    await bot.start()
+    from pyrogram import idle
+    await idle()
+    await bot.stop()
 
-@bot.on_message(filters.command("help") & filters.private)
-async def help_cmd(client, message):
-    await message.reply_text(
-        "Available commands:\n"
-        "/start\n"
-        "/post\n"
-        "/add_shortner_account\n"
-        "/remove_shortner_account\n"
-        "/send\n"
-        "/send_more_channel\n"
-        "/force_sub\n"
-        "/addpremium\n"
-        "/removepremium"
-    )
-
-# --- RUN BOT & WEB ---
 if __name__ == "__main__":
-    Thread(target=run_web).start()
-    bot.run()
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
