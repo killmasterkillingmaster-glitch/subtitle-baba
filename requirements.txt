@@ -1,0 +1,6 @@
+pyrogram
+tgcrypto
+Flask
+pymongo
+aiohttp
+python-dotenv
