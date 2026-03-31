@@ -1,155 +1,173 @@
 import os
 import asyncio
-import aiohttp
-from pyrogram import Client, filters, enums
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from flask import Flask
+from datetime import datetime, timedelta
 from threading import Thread
-from pymongo import MongoClient
 
-# --- WEB SERVER (For Render Free Tier) ---
+import aiohttp
+from flask import Flask
+from motor.motor_asyncio import AsyncIOMotorClient
+from pyrogram import Client, filters, enums
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+
+# ---------------- CONFIG ----------------
+OWNER_ID = 5351848105
+ALLOWED_USERS = [5344078567]
+DB_CHANNEL = 5344078567
+ALLOWED_GROUP = -1003899919015
+
+# Port automatically fetch hoga hosting se, warna 8080 use karega
+PORT = int(os.environ.get("PORT", 8080))
+
+# API credentials via environment variables (secure)
+API_ID = int(os.environ.get("API_ID", "123456"))
+API_HASH = os.environ.get("API_HASH", "abcdef123456")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "123456:ABCDEF")
+
+# ---------------- MONGO SETUP (Async Motor) ----------------
+MONGO_URI = "mongodb+srv://aasifhusenaasifkhan_db_user:64CtKuQjWL0EzYMO@botcluster.v4land1.mongodb.net/?retryWrites=true&w=majority"
+DB_NAME = "subtitle_baba"
+
+client = AsyncIOMotorClient(MONGO_URI)
+db = client[DB_NAME]
+
+posts_col = db.posts
+premium_col = db.premium
+shortner_col = db.shortners
+channels_col = db.channels
+
+# ---------------- FLASK KEEP-ALIVE ----------------
 web_app = Flask(__name__)
 
-@web_app.route('/')
+@web_app.route("/")
 def health_check():
-    return "Bot is running perfectly on Render!"
+    return "Bot is running perfectly!"
 
 def run_web():
-    web_app.run(host="0.0.0.0", port=10000)
+    web_app.run(host="0.0.0.0", port=PORT)
 
-# --- CONFIG ---
-API_ID = 12345
-API_HASH = "your_api_hash"
-BOT_TOKEN = "your_bot_token"
-OWNER_ID = 5351848105
-DB_CHANNEL = -1003143681742
+Thread(target=run_web, daemon=True).start()
 
-# --- MongoDB URI (HARD CODED) ---
-MONGO_URI = "mongodb+srv://aasifhusenaasifkhan_db_user:64CtKuQjWL0EzYMO@botcluster.v4land1.mongodb.net/?retryWrites=true&w=majority"
+# ---------------- PYROGRAM CLIENT ----------------
+app = Client("anime_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client["BotDatabase"]
-collection = db["Posts"]
+# ---------------- UTILITY FUNCTIONS ----------------
+def is_owner(user_id):
+    return user_id == OWNER_ID
 
-# --- Shortener (bot se handle) ---
-bot_settings = {
-    "shortener_api": "",
-    "shortener_url": "",
-    "fsub_channels": [-1003872932495]
-}
+def is_allowed(user_id):
+    return user_id in ALLOWED_USERS or is_owner(user_id)
 
-user_data = {}
-
-app = Client("my_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
-# --- SHORTENER LOGIC ---
-async def get_shortlink(long_url):
-    if not bot_settings["shortener_api"] or not bot_settings["shortener_url"]:
-        return long_url
-
-    domain = bot_settings["shortener_url"].lower()
-    if "gplinks" in domain:
-        api_url = f"https://api.gplinks.com/api?api={bot_settings['shortener_api']}&url={long_url}"
-    else:
-        api_url = f"https://{domain}/api?api={bot_settings['shortener_api']}&url={long_url}"
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(api_url) as res:
-                data = await res.json()
-                return data.get("shortenedUrl") or data.get("short_url") or data.get("shortened_url") or data.get("url") or long_url
-    except:
-        return long_url
-
-async def is_subscribed(user_id):
-    for chat_id in bot_settings["fsub_channels"]:
-        try:
-            member = await app.get_chat_member(chat_id, user_id)
-            if member.status == enums.ChatMemberStatus.LEFT:
-                return False
-        except:
-            continue
+async def is_premium(user_id):
+    member = await premium_col.find_one({"user_id": user_id})
+    if not member:
+        return False
+    expire = member.get("expires_at")
+    if expire and datetime.utcnow() > expire:
+        await premium_col.delete_one({"user_id": user_id})
+        return False
     return True
 
-# --- START COMMAND ---
+async def send_to_channels(message_id, from_chat, chat_list):
+    for chat_id in chat_list:
+        try:
+            await app.forward_messages(chat_id=chat_id, from_chat_id=from_chat, message_ids=message_id)
+        except Exception as e:
+            print(f"Error sending to {chat_id}: {e}")
+
+# ---------------- COMMANDS ----------------
 @app.on_message(filters.command("start") & filters.private)
-async def start_cmd(client, message):
-    await message.reply("Bhai, main zinda hu! Commands dekhne ke liye /setting dabao.")
+async def start_cmd(client, message: Message):
+    await message.reply_text("Hello 🤗 Anime Bot is Active!")
 
-# --- SETTINGS COMMAND ---
-@app.on_message(filters.command("setting") & filters.user([OWNER_ID]))
-async def settings_cmd(client, message):
-    await message.reply("""
-⚙️ Bot Commands:
-/post - New post
-/link_shortener - Shortener setup
-/link - Generate link
-/setting - List commands
-""")
-
-# --- POST COMMAND ---
-@app.on_message(filters.command("post") & filters.user([OWNER_ID]) & filters.private)
-async def post_command(client, message):
-    uid = message.from_user.id
-    user_data.setdefault(uid, {})
-    user_data[uid]["state"] = "waiting_for_post"
-    await message.reply("📸 Apna Post bhejo (Photo, Video, ya Text)")
-
-# --- SHORTENER SETUP ---
-@app.on_message(filters.command("link_shortener") & filters.user([OWNER_ID]))
-async def shortener_setup(client, message):
-    uid = message.from_user.id
-    user_data.setdefault(uid, {})
-    user_data[uid]["state"] = "set_url"
-    await message.reply("🌐 Shortener Domain bhejo (e.g., gplinks.com)")
-
-# --- LINK COMMAND ---
-@app.on_message(filters.command("link") & filters.user([OWNER_ID]))
-async def get_link_command(client, message):
-    await message.reply("✅ Done? Click the button:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Done", callback_data="gen_link")]]))
-
-# --- MASTER INPUT HANDLER ---
-@app.on_message(filters.private & filters.user([OWNER_ID]) & ~filters.command(["start","link","link_shortener","setting","post"]))
-async def master_input_handler(client, message):
-    uid = message.from_user.id
-    if uid not in user_data:
+@app.on_message(filters.command("post") & filters.private)
+async def post_cmd(client, message: Message):
+    if not is_allowed(message.from_user.id):
+        await message.reply_text("❌ You are not allowed to use this command.")
         return
+    if not message.reply_to_message:
+        await message.reply_text("Please reply to a document/image/video to create a post.")
+        return
+    post = message.reply_to_message
+    result = await posts_col.insert_one({
+        "file_id": post.id,
+        "chat_id": post.chat.id,
+        "created_at": datetime.utcnow()
+    })
+    await message.reply_text(f"Post received 🤗\nPost ID: `{result.inserted_id}`\nPlease forward episode from DB channel to continue.")
 
-    state = user_data[uid].get("state")
+@app.on_message(filters.command("getlink") & filters.private)
+async def getlink_cmd(client, message: Message):
+    if len(message.command) < 2:
+        await message.reply_text("Usage: `/getlink <episode_number>`")
+        return
+    try:
+        episode_num = message.command[1]
+        cursor = posts_col.find().sort("created_at", -1).limit(1)
+        last_posts = await cursor.to_list(length=1)
+        if not last_posts:
+            await message.reply_text("Database is empty. No posts found.")
+            return
+        short_url = f"https://gplinks.in/short/{episode_num}"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"Watch Episode {episode_num}", url=short_url)]
+        ])
+        await message.reply_text("Here is your episode link:", reply_markup=keyboard)
+    except Exception as e:
+        await message.reply_text(f"Error: {e}")
 
-    if state == "waiting_for_post":
-        user_data[uid]["post"] = message
-        user_data[uid]["state"] = None
-        btns = [[InlineKeyboardButton("Single Link", callback_data="set_single"), InlineKeyboardButton("Batch Link", callback_data="set_batch")]]
-        await message.reply("✅ Post saved! Option choose karo:", reply_markup=InlineKeyboardMarkup(btns))
+@app.on_message(filters.command("batchlink") & filters.private)
+async def batchlink_cmd(client, message: Message):
+    if not is_allowed(message.from_user.id):
+        return
+    await message.reply_text("Batchlink system active.\nForward first & last episodes from DB to generate batch.")
 
-    elif state == "set_url":
-        bot_settings["shortener_url"] = message.text.strip().replace("https://","").replace("http://","").replace("/","")
-        user_data[uid]["state"] = "set_api"
-        await message.reply(f"Domain set: `{bot_settings['shortener_url']}`\nAb API bhejo:")
+@app.on_message(filters.command("addpremium") & filters.private)
+async def add_premium_cmd(client, message: Message):
+    if not is_allowed(message.from_user.id):
+        await message.reply_text("❌ You are not allowed to use this command.")
+        return
+    try:
+        user_id = int(message.command[1])
+        expires_at = datetime.utcnow() + timedelta(days=28)
+        await premium_col.update_one(
+            {"user_id": user_id},
+            {"$set": {"expires_at": expires_at}},
+            upsert=True
+        )
+        await message.reply_text(f"✅ Premium activated for `{user_id}` till {expires_at.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    except IndexError:
+        await message.reply_text("Usage: `/addpremium <user_id>`")
+    except ValueError:
+        await message.reply_text("Error: User ID must be a number.")
+    except Exception as e:
+        await message.reply_text(f"An error occurred: {e}")
 
-    elif state == "set_api":
-        bot_settings["shortener_api"] = message.text.strip()
-        user_data[uid]["state"] = None
-        await message.reply("✅ Shortener set ho gaya!")
+@app.on_message(filters.command("forcesub") & filters.private)
+async def force_sub_cmd(client, message: Message):
+    if not is_owner(message.from_user.id):
+        await message.reply_text("❌ Only owner can set Force Sub channel.")
+        return
+    if not message.reply_to_message:
+        await message.reply_text("Please forward a message from the channel to activate Force Sub.")
+        return
+    forwarded = message.reply_to_message
+    if not forwarded.forward_from_chat or forwarded.forward_from_chat.type != enums.ChatType.CHANNEL:
+        await message.reply_text("❌ Invalid input! Please forward a message strictly from a **Channel**.")
+        return
+    channel_id = forwarded.forward_from_chat.id
+    channel_title = forwarded.forward_from_chat.title
+    await channels_col.update_one(
+        {"type": "force_sub"},
+        {"$set": {
+            "channel_id": channel_id, 
+            "message_id": forwarded.id,
+            "title": channel_title
+        }},
+        upsert=True
+    )
+    await message.reply_text(f"✅ Force Sub successfully set to channel:\n**{channel_title}** (`{channel_id}`)")
 
-# --- CALLBACKS ---
-@app.on_callback_query(filters.regex("^(set_single|set_batch|gen_link|send_now)"))
-async def callbacks(client, query):
-    uid = query.from_user.id
-    data = query.data
-    if data == "set_single":
-        user_data[uid]["mode"] = "single"
-        await query.message.edit("Database channel se 1 episode forward karo, fir `/link`")
-    elif data == "set_batch":
-        user_data[uid]["mode"] = "batch"
-        await query.message.edit("Start & End episode forward karo, fir `/link`")
-    elif data == "gen_link":
-        user_data[uid]["state"] = "waiting_num"
-        await query.message.edit("Episode Number daalo:")
-
-# --- RUN ---
+# ---------------- RUN BOT ----------------
 if __name__ == "__main__":
-    Thread(target=run_web).start()
-    print("Bot Started...")
+    print("Bot is starting...")
     app.run()
