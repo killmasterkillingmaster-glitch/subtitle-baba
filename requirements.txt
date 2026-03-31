@@ -1,6 +1,6 @@
-pyrogram==2.0.106
-tgcrypto==1.2.5
-motor==3.3.1
-pyromod==2.1.2
-aiohttp==3.8.6
-dnspython==2.4.2
+pyrogram
+tgcrypto
+motor
+pyromod
+aiohttp
+dnspython
