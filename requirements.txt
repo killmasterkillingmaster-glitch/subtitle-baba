@@ -1,4 +1,0 @@
-pyrogram>=2.0
-tgcrypto
-faster_whisper
-aiohttp
