@@ -1,6 +1,6 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
-from config import ALLOWED_USERS
+from config import ALLOWED_USERS, STORAGE_CHANNEL
 from plugins.utils import channels_col
 
 SEND_POST, LINK_TYPE, SEND_EPISODE, EPISODE_NUMBER, CONFIRM = range(5)
@@ -29,13 +29,15 @@ async def choose_link_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return BATCH_EPISODES
     return LINK_TYPE
 
+# BOT KHUD CHANNEL ME SAVE KAREGA (100% Safe)
 async def receive_episode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.forward_origin and update.message.forward_origin.type == 'channel':
-        context.user_data['file_msg_id'] = update.message.forward_origin.message_id
+    try:
+        fwd = await update.message.copy(chat_id=STORAGE_CHANNEL)
+        context.user_data['file_msg_id'] = fwd.message_id
         await update.message.reply_text("Enter Number")
         return EPISODE_NUMBER
-    else:
-        await update.message.reply_text("❌ Galat! Please Episode ko Database Channel se forward karein.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}\nFirse episode bhejein.")
         return SEND_EPISODE
 
 async def receive_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -44,16 +46,17 @@ async def receive_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return CONFIRM
 
 async def receive_batch_episode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.text == "/done":
+    if update.message.text and update.message.text.lower() == "/done":
         await update.message.reply_text("batch successfully adding\nEnter number")
         return BATCH_RANGE
     
-    if update.message.forward_origin and update.message.forward_origin.type == 'channel':
-        context.user_data['batch_ids'].append(update.message.forward_origin.message_id)
+    try:
+        fwd = await update.message.copy(chat_id=STORAGE_CHANNEL)
+        context.user_data['batch_ids'].append(fwd.message_id)
         await update.message.reply_text("send next episode\n(jab ho jaye toh /done bhejein)")
         return BATCH_EPISODES
-    else:
-        await update.message.reply_text("❌ Galat! Please Database Channel se forward karein.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}\nFirse episode bhejein.")
         return BATCH_EPISODES
 
 async def receive_batch_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -74,7 +77,6 @@ async def confirm_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         payload = f"S_{context.user_data['file_msg_id']}"
         btn_text = f"Watch Episode {context.user_data['episode_num']}"
 
-    # Telegram Deep Link for Button
     deep_link = f"https://t.me/{context.bot.username}?start={payload}"
     markup = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, url=deep_link)]])
     
@@ -83,7 +85,6 @@ async def confirm_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.bot_data['final_post'] = {'msg': post_msg, 'markup': markup}
     return ConversationHandler.END
 
-# --- SEND SYSTEM LOGIC ---
 async def cmd_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ALLOWED_USERS: return
     channels = await channels_col.find().to_list(length=100)
