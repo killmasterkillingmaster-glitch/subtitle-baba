@@ -1,7 +1,7 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 from config import ALLOWED_USERS, STORAGE_CHANNEL
-from plugins.utils import load_json
+from plugins.utils import channels_col
 
 SEND_POST, LINK_TYPE, SEND_EPISODE, EPISODE_NUMBER, CONFIRM = range(5)
 BATCH_EPISODES, BATCH_RANGE, BATCH_CONFIRM = range(5, 8)
@@ -29,7 +29,6 @@ async def choose_link_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return BATCH_EPISODES
     return LINK_TYPE
 
-# --- EPISODE LOGIC (NO FORWARDING TO DB) ---
 async def receive_episode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.forward_origin and update.message.forward_origin.type == 'channel':
         context.user_data['file_msg_id'] = update.message.forward_origin.message_id
@@ -75,66 +74,68 @@ async def confirm_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         payload = f"S_{context.user_data['file_msg_id']}"
         btn_text = f"Watch Episode {context.user_data['episode_num']}"
 
-    # Telegram Deep Link for Button (Premium Check bot ke andar hoga)
+    # Ye rahi wo jadoo wali link jo bot check karegi
     deep_link = f"https://t.me/{context.bot.username}?start={payload}"
     markup = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, url=deep_link)]])
     
     await post_msg.copy(update.effective_chat.id, reply_markup=markup)
-    await update.message.reply_text("Send ya Send more channel", reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("Send", callback_data="send_single")],
-        [InlineKeyboardButton("Send more channel", callback_data="send_more")]
-    ]))
-    context.user_data['final_post'] = {'msg': post_msg, 'markup': markup}
+    await update.message.reply_text("[ Send ]\n[ Send more channel ]")
+    context.bot_data['final_post'] = {'msg': post_msg, 'markup': markup}
     return ConversationHandler.END
 
-# --- SEND SYSTEM LOGIC ---
-async def handle_send_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    channels = load_json("channels.json")
+# --- SEND SYSTEM LOGIC (With /confirm feature) ---
+async def cmd_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ALLOWED_USERS: return
+    channels = await channels_col.find().to_list(length=100)
+    if not channels: return await update.message.reply_text("Koi channel nahi hai. Pehle /force sub karein.")
+
+    btns = [[InlineKeyboardButton(ch['title'], callback_data=f"psingle_{ch['_id']}")] for ch in channels]
+    await update.message.reply_text("Select One Channel to Send:", reply_markup=InlineKeyboardMarkup(btns))
+
+async def cmd_send_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ALLOWED_USERS: return
+    channels = await channels_col.find().to_list(length=100)
+    context.user_data['selected_chs'] = []
     
-    if not channels:
-        return await query.edit_message_text("❌ FSub list khali hai. Pehle `/forcesub` se channel add karo.")
-
-    if query.data == "send_single":
-        btns = [[InlineKeyboardButton(ch['name'], callback_data=f"psingle_{ch['id']}")] for ch in channels]
-        await query.edit_message_text("Select One Channel to Send:", reply_markup=InlineKeyboardMarkup(btns))
-
-    elif query.data == "send_more":
-        context.user_data['selected_chs'] = []
-        btns = [[InlineKeyboardButton(f"❌ {ch['name']}", callback_data=f"pmulti_{ch['id']}")] for ch in channels]
-        btns.append([InlineKeyboardButton("Confirm Send 📤", callback_data="pmulti_confirm")])
-        await query.edit_message_text("Select Multiple Channels:", reply_markup=InlineKeyboardMarkup(btns))
+    btns = [[InlineKeyboardButton(f"⭕️ {ch['title']}", callback_data=f"pmulti_{ch['_id']}")] for ch in channels]
+    await update.message.reply_text("Select Multiple Channels:", reply_markup=InlineKeyboardMarkup(btns))
 
 async def handle_push_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
-    post = context.user_data.get('final_post')
 
     if data.startswith("psingle_"):
         ch_id = int(data.split("_")[1])
-        await post['msg'].copy(ch_id, reply_markup=post['markup'])
-        await query.edit_message_text("✅ Post successfully published on selected channel!")
-
-    elif data.startswith("pmulti_confirm"):
-        selected = context.user_data.get('selected_chs', [])
-        if not selected: return await query.message.reply_text("Ek bhi channel select nahi kiya!")
-        for ch_id in selected:
-            try: await post['msg'].copy(ch_id, reply_markup=post['markup'])
-            except: pass
-        await query.edit_message_text("✅ Multiple Channels me Post bhej di gayi!")
+        context.user_data['ready_to_send'] = [ch_id]
+        await query.message.reply_text("confirm please")
 
     elif data.startswith("pmulti_"):
         ch_id = int(data.split("_")[1])
         selected = context.user_data.get('selected_chs', [])
         if ch_id in selected: selected.remove(ch_id)
         else: selected.append(ch_id)
+        
+        context.user_data['ready_to_send'] = selected
 
-        channels = load_json("channels.json")
+        channels = await channels_col.find().to_list(length=100)
         btns = []
         for ch in channels:
-            mark = "✅" if ch['id'] in selected else "❌"
-            btns.append([InlineKeyboardButton(f"{mark} {ch['name']}", callback_data=f"pmulti_{ch['id']}")])
-        btns.append([InlineKeyboardButton("Confirm Send 📤", callback_data="pmulti_confirm")])
+            mark = "✅" if int(ch['_id']) in selected else "⭕️"
+            btns.append([InlineKeyboardButton(f"{mark} {ch['title']}", callback_data=f"pmulti_{ch['_id']}")])
+            
         await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(btns))
+        await query.message.reply_text("confirm please")
+
+async def final_send_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    targets = context.user_data.get('ready_to_send', [])
+    post = context.bot_data.get('final_post')
+    
+    if not targets or not post: return
+    
+    for ch_id in targets:
+        try: await post['msg'].copy(ch_id, reply_markup=post['markup'])
+        except: pass
+    
+    await update.message.reply_text("✅ Post successfully published on selected channels!")
+    context.user_data['ready_to_send'] = []
