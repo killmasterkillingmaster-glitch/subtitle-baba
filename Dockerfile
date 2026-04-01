@@ -2,16 +2,17 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Dependencies
+# Install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Sab files copy
+# Copy all files
 COPY . .
 
-# Data folder (JSON files ke liye)
+# Data folder for JSON files
 RUN mkdir -p data
 
+# Render port
 EXPOSE 10000
 
 CMD ["python", "main.py"]
