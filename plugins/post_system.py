@@ -1,6 +1,6 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
-from config import ALLOWED_USERS, STORAGE_CHANNEL
+from config import ALLOWED_USERS
 from plugins.utils import channels_col
 
 SEND_POST, LINK_TYPE, SEND_EPISODE, EPISODE_NUMBER, CONFIRM = range(5)
@@ -74,7 +74,7 @@ async def confirm_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         payload = f"S_{context.user_data['file_msg_id']}"
         btn_text = f"Watch Episode {context.user_data['episode_num']}"
 
-    # Ye rahi wo jadoo wali link jo bot check karegi
+    # Telegram Deep Link for Button
     deep_link = f"https://t.me/{context.bot.username}?start={payload}"
     markup = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, url=deep_link)]])
     
@@ -83,7 +83,7 @@ async def confirm_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.bot_data['final_post'] = {'msg': post_msg, 'markup': markup}
     return ConversationHandler.END
 
-# --- SEND SYSTEM LOGIC (With /confirm feature) ---
+# --- SEND SYSTEM LOGIC ---
 async def cmd_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ALLOWED_USERS: return
     channels = await channels_col.find().to_list(length=100)
@@ -117,7 +117,6 @@ async def handle_push_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         else: selected.append(ch_id)
         
         context.user_data['ready_to_send'] = selected
-
         channels = await channels_col.find().to_list(length=100)
         btns = []
         for ch in channels:
@@ -125,17 +124,17 @@ async def handle_push_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             btns.append([InlineKeyboardButton(f"{mark} {ch['title']}", callback_data=f"pmulti_{ch['_id']}")])
             
         await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(btns))
-        await query.message.reply_text("confirm please")
+        await query.message.reply_text("confirm please (type /confirm)")
 
 async def final_send_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     targets = context.user_data.get('ready_to_send', [])
     post = context.bot_data.get('final_post')
     
-    if not targets or not post: return
+    if not targets or not post: return await update.message.reply_text("Kuch error aaya, firse try karein.")
     
     for ch_id in targets:
         try: await post['msg'].copy(ch_id, reply_markup=post['markup'])
-        except: pass
+        except Exception as e: print(f"Failed to send to {ch_id}: {e}")
     
     await update.message.reply_text("✅ Post successfully published on selected channels!")
     context.user_data['ready_to_send'] = []
