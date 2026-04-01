@@ -1,12 +1,16 @@
 FROM python:3.10.8-slim-buster
 
+# Set working directory
 WORKDIR /app
-COPY requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt
 
-COPY . .
+# Copy all files from GitHub to /app folder in Docker
+COPY . /app
 
-# Render port configuration
+# Install python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Expose Port for Render Free Tier (Very Important)
 EXPOSE 10000
 
-CMD ["python3", "main.py"]
+# Run the bot
+CMD ["python", "main.py"]
