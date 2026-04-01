@@ -1,5 +1,0 @@
-pyrogram
-tgcrypto
-Flask
-aiohttp
-pyromod
