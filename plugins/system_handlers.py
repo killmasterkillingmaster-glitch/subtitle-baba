@@ -5,7 +5,6 @@ from bson.objectid import ObjectId
 from config import ALLOWED_USERS
 from plugins.utils import get_short_link, send_files, is_premium_user, channels_col, shorteners_col, premium_col
 
-# --- PUBLIC START COMMAND (MAIN LOGIC) ---
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     args = context.args
@@ -13,9 +12,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not args:
         return await update.message.reply_text("Bot Started! Send me valid links.")
 
-    payload = args[0] # Example: S_123 ya V_S_123
+    payload = args[0]
 
-    # 1. Check Force Sub (Sirf wahi channel jahan bot admin hai)
     channels = await channels_col.find().to_list(length=100)
     join_btns = []
     is_joined_all = True
@@ -35,20 +33,16 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         join_btns.append([InlineKeyboardButton("Try again", url=f"https://t.me/{context.bot.username}?start={payload}")])
         return await update.message.reply_text("join first", reply_markup=InlineKeyboardMarkup(join_btns))
 
-    # 2. Premium Check
     is_premium = await is_premium_user(user_id)
 
-    # 3. Shortener Logic (Bot khud check karega premium hai ya normal)
     if not payload.startswith("V_") and not is_premium:
         verify_deep_link = f"https://t.me/{context.bot.username}?start=V_{payload}"
         short_link = await get_short_link(verify_deep_link)
         btn = [[InlineKeyboardButton("Click Here To Get Episode", url=short_link)]]
         return await update.message.reply_text("Aapko pehle link solve karna hoga:\n👇👇👇", reply_markup=InlineKeyboardMarkup(btn))
 
-    # 4. Delivery
     await send_files(context.bot, user_id, payload)
 
-# --- SETTING / COMMAND LIST ---
 async def cmd_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ALLOWED_USERS: return
     text = """
@@ -74,7 +68,6 @@ async def cmd_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     await update.message.reply_text(text)
 
-# --- SHORTENER LOGIC ---
 WAIT_URL, WAIT_TOKEN = range(2)
 
 async def add_shortener_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -111,9 +104,10 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await shorteners_col.delete_one({"_id": ObjectId(context.user_data['del_short_id'])})
         await update.message.reply_text("successfully delete account for shortner")
         del context.user_data['del_short_id']
+    else:
+        await update.message.reply_text("Process Cancelled / Deleted.")
     return ConversationHandler.END
 
-# --- PREMIUM LOGIC ---
 PREM_ID, PREM_CONF = range(2)
 
 async def add_premium_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -152,7 +146,6 @@ async def show_prem(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"ID: `{x['_id']}` | Exp: {x['expiry'][:10]}\n"
     await update.message.reply_text(text if docs else "No premium users.")
 
-# --- FORCE SUB LOGIC ---
 async def add_fsub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ALLOWED_USERS: return
     await update.message.reply_text("please send massage and chack I'm admin gc")
