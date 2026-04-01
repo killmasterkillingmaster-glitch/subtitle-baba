@@ -10,6 +10,7 @@ import pyromod.listen
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
 PORT = int(os.getenv("PORT", 10000))
 
 ALLOWED_USERS = [5351848105, 5344078567]
@@ -42,18 +43,15 @@ async def start(client, message):
 # ---------------- ADD SHORTNER ----------------
 @bot.on_message(filters.command("add_shortner_account") & filters.user(ALLOWED_USERS))
 async def add_short(client, message):
-    url = await client.ask(message.chat.id, "Send Shortner URL\nExample: https://gplinks.in")
+    url = await client.ask(message.chat.id, "Send Shortner Domain\nExample: https://gplinks.in")
     api = await client.ask(message.chat.id, "Send API Token")
 
-    clean_url = url.text.strip().rstrip("/")  # fix slash issue
-
-    text = f"#SHORTNER\nURL={clean_url}\nAPI={api.text.strip()}"
-
+    text = f"#SHORTNER\nURL={url.text.strip()}\nAPI={api.text.strip()}"
     await client.send_message(STORAGE_CHANNEL, text)
 
     await message.reply_text("✅ Shortner Added & Saved")
 
-# ---------------- GET ALL SHORTNERS ----------------
+# ---------------- GET SHORTNERS ----------------
 async def get_shortners(client):
     data = []
 
@@ -63,9 +61,13 @@ async def get_shortners(client):
                 lines = msg.text.split("\n")
                 url = lines[1].split("=")[1]
                 api = lines[2].split("=")[1]
-                data.append({"url": url, "api": api, "msg_id": msg.id})
+                data.append({
+                    "url": url,
+                    "api": api,
+                    "msg_id": msg.id
+                })
             except:
-                continue
+                pass
 
     return data
 
@@ -83,7 +85,10 @@ async def remove_short(client, message):
             InlineKeyboardButton(s["url"], callback_data=f"del_{s['msg_id']}")
         ])
 
-    await message.reply_text("Select account to delete:", reply_markup=InlineKeyboardMarkup(buttons))
+    await message.reply_text(
+        "Select account to delete:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
 # ---------------- DELETE CALLBACK ----------------
 @bot.on_callback_query(filters.regex("^del_"))
@@ -103,55 +108,44 @@ async def get_next_shortner(client):
     if not shortners:
         return None
 
-    if index >= len(shortners):
-        index = 0
-
     s = shortners[index]
-    index += 1
-
+    index = (index + 1) % len(shortners)
     return s
 
-# ---------------- GPLinks SHORTNER ----------------
-async def generate_short_link(url, api, link):
-    api_url = f"{url}/api?api={api}&url={link}"
-
-    timeout = aiohttp.ClientTimeout(total=10)
-
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        try:
-            async with session.get(api_url) as resp:
-                try:
-                    # Try JSON
-                    data = await resp.json()
-                    if data.get("status") == "success":
-                        return data.get("shortenedUrl")
-                except:
-                    # Try TEXT
-                    text = await resp.text()
-                    if "http" in text:
-                        return text.strip()
-        except:
-            pass
-
-    return link  # fallback
-
-# ---------------- TEST ----------------
-@bot.on_message(filters.command("test"))
+# ---------------- TEST SHORTNER ----------------
+@bot.on_message(filters.command("test") & filters.private)
 async def test(client, message):
-    link = await client.ask(message.chat.id, "Send link")
+    link_msg = await client.ask(message.chat.id, "Send link")
+    long_url = link_msg.text.strip()
 
     s = await get_next_shortner(client)
 
-    if s:
-        short = await generate_short_link(s["url"], s["api"], link.text)
-    else:
-        short = link.text
+    if not s:
+        return await message.reply_text("❌ No shortner added")
+
+    api_url = f"{s['url']}/api?api={s['api']}&url={long_url}&format=json"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url) as resp:
+                text = await resp.text()
+                print("RAW RESPONSE:", text)
+
+                data = await resp.json()
+
+                if data.get("status") == "success":
+                    short = data.get("shortenedUrl")
+                else:
+                    return await message.reply_text(f"❌ API ERROR:\n{data}")
+
+    except Exception as e:
+        return await message.reply_text(f"❌ ERROR:\n{e}")
 
     btn = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Open", url=short)]]
+        [[InlineKeyboardButton("Open Link", url=short)]]
     )
 
-    await message.reply_text("✅ Done", reply_markup=btn)
+    await message.reply_text("✅ Short Link Generated", reply_markup=btn)
 
 # ---------------- RUN ----------------
 if __name__ == "__main__":
