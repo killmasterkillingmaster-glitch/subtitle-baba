@@ -10,11 +10,10 @@ import pyromod.listen
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
 PORT = int(os.getenv("PORT", 10000))
 
 ALLOWED_USERS = [5351848105, 5344078567]
-STORAGE_CHANNEL = -1003096528862  # 🔥 tera channel
+STORAGE_CHANNEL = -1003096528862
 
 # ---------------- WEB ----------------
 app = Flask(__name__)
@@ -31,8 +30,7 @@ bot = Client(
     "bot",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    workers=10
+    bot_token=BOT_TOKEN
 )
 
 # ---------------- START ----------------
@@ -43,39 +41,77 @@ async def start(client, message):
 # ---------------- ADD SHORTNER ----------------
 @bot.on_message(filters.command("add_shortner_account") & filters.user(ALLOWED_USERS))
 async def add_short(client, message):
-    url = await client.ask(message.chat.id, "Send API URL")
+    url = await client.ask(message.chat.id, "Send Shortner API URL\nExample: https://gplinks.in")
     api = await client.ask(message.chat.id, "Send API Token")
 
-    data = f"SHORTNER\n{url.text.strip()}\n{api.text.strip()}"
+    text = f"#SHORTNER\nURL={url.text.strip()}\nAPI={api.text.strip()}"
 
-    # Save in storage channel
-    await client.send_message(STORAGE_CHANNEL, data)
+    await client.send_message(STORAGE_CHANNEL, text)
 
-    await message.reply_text("✅ Shortner Saved in Storage Channel")
+    await message.reply_text("✅ Shortner Added & Saved")
 
-# ---------------- GET SHORTNER ----------------
-async def get_shortner(client):
-    shortners = []
+# ---------------- GET ALL SHORTNERS ----------------
+async def get_shortners(client):
+    data = []
 
-    async for msg in client.get_chat_history(STORAGE_CHANNEL, limit=50):
-        if msg.text and msg.text.startswith("SHORTNER"):
+    async for msg in client.get_chat_history(STORAGE_CHANNEL, limit=100):
+        if msg.text and msg.text.startswith("#SHORTNER"):
             try:
-                _, url, api = msg.text.split("\n")
-                shortners.append({"url": url, "api": api})
+                lines = msg.text.split("\n")
+                url = lines[1].split("=")[1]
+                api = lines[2].split("=")[1]
+                data.append({"url": url, "api": api, "msg_id": msg.id})
             except:
                 pass
 
-    return shortners
+    return data
 
-# ---------------- TEST SHORTNER ----------------
-@bot.on_message(filters.command("test") & filters.private)
+# ---------------- REMOVE SHORTNER ----------------
+@bot.on_message(filters.command("remove_shortner_account") & filters.user(ALLOWED_USERS))
+async def remove_short(client, message):
+    shortners = await get_shortners(client)
+
+    if not shortners:
+        return await message.reply_text("⚠️ No shortner found")
+
+    buttons = []
+    for s in shortners:
+        buttons.append([
+            InlineKeyboardButton(s["url"], callback_data=f"del_{s['msg_id']}")
+        ])
+
+    await message.reply_text("Select account to delete:", reply_markup=InlineKeyboardMarkup(buttons))
+
+# ---------------- DELETE CALLBACK ----------------
+@bot.on_callback_query(filters.regex("^del_"))
+async def delete_short(client, query):
+    msg_id = int(query.data.split("_")[1])
+
+    await client.delete_messages(STORAGE_CHANNEL, msg_id)
+    await query.message.edit_text("❌ Shortner Deleted")
+
+# ---------------- ROTATION ----------------
+index = 0
+
+async def get_next_shortner(client):
+    global index
+    shortners = await get_shortners(client)
+
+    if not shortners:
+        return None
+
+    s = shortners[index]
+    index = (index + 1) % len(shortners)
+    return s
+
+# ---------------- TEST ----------------
+@bot.on_message(filters.command("test"))
 async def test(client, message):
     link = await client.ask(message.chat.id, "Send link")
 
-    shortners = await get_shortner(client)
+    s = await get_next_shortner(client)
 
-    if shortners:
-        s = shortners[0]
+    if s:
         api_url = f"{s['url']}/api?api={s['api']}&url={link.text}"
 
         async with aiohttp.ClientSession() as session:
@@ -93,33 +129,6 @@ async def test(client, message):
     )
 
     await message.reply_text("✅ Done", reply_markup=btn)
-
-# ---------------- REMOVE SHORTNER ----------------
-@bot.on_message(filters.command("remove_shortner_account") & filters.user(ALLOWED_USERS))
-async def remove_short(client, message):
-    msgs = []
-
-    async for msg in client.get_chat_history(STORAGE_CHANNEL, limit=50):
-        if msg.text and msg.text.startswith("SHORTNER"):
-            msgs.append(msg)
-
-    if not msgs:
-        return await message.reply_text("⚠️ No shortner found")
-
-    buttons = []
-    for i, m in enumerate(msgs):
-        buttons.append([InlineKeyboardButton(f"Account {i+1}", callback_data=f"del_{m.id}")])
-
-    await message.reply_text("Select account:", reply_markup=InlineKeyboardMarkup(buttons))
-
-# ---------------- DELETE CALLBACK ----------------
-@bot.on_callback_query(filters.regex("^del_"))
-async def delete_shortner(client, query):
-    msg_id = int(query.data.split("_")[1])
-
-    await client.delete_messages(STORAGE_CHANNEL, msg_id)
-
-    await query.message.edit_text("✅ Shortner Deleted")
 
 # ---------------- RUN ----------------
 if __name__ == "__main__":
