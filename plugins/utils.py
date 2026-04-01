@@ -22,15 +22,18 @@ def save_json(filename, data):
 def get_short_link(long_url: str) -> str:
     shorteners = load_json("shorteners.json")
     if not shorteners:
-        return long_url # Agar shortener add nahi hai toh direct link dega
+        return long_url # Agar link nahi hai toh direct de dega
     
     short = random.choice(shorteners)
+    
+    # GP Links ka API endpoint fix
+    if "gplinks" in short['url'].lower():
+        api_url = "https://api.gplinks.com/api"
+    else:
+        api_url = f"{short['url'].rstrip('/')}/api"
+
     try:
-        r = requests.get(
-            f"{short['url']}api",
-            params={"api": short['api'], "url": long_url},
-            timeout=10
-        )
+        r = requests.get(api_url, params={"api": short['api'], "url": long_url}, timeout=10)
         data = r.json()
         if data.get("status") == "success":
             return data["shortenedUrl"]
