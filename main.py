@@ -30,7 +30,8 @@ bot = Client(
     "bot",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN
+    bot_token=BOT_TOKEN,
+    workers=10
 )
 
 # ---------------- START ----------------
@@ -41,10 +42,12 @@ async def start(client, message):
 # ---------------- ADD SHORTNER ----------------
 @bot.on_message(filters.command("add_shortner_account") & filters.user(ALLOWED_USERS))
 async def add_short(client, message):
-    url = await client.ask(message.chat.id, "Send Shortner API URL\nExample: https://gplinks.in")
+    url = await client.ask(message.chat.id, "Send Shortner URL\nExample: https://gplinks.in")
     api = await client.ask(message.chat.id, "Send API Token")
 
-    text = f"#SHORTNER\nURL={url.text.strip()}\nAPI={api.text.strip()}"
+    clean_url = url.text.strip().rstrip("/")  # fix slash issue
+
+    text = f"#SHORTNER\nURL={clean_url}\nAPI={api.text.strip()}"
 
     await client.send_message(STORAGE_CHANNEL, text)
 
@@ -62,7 +65,7 @@ async def get_shortners(client):
                 api = lines[2].split("=")[1]
                 data.append({"url": url, "api": api, "msg_id": msg.id})
             except:
-                pass
+                continue
 
     return data
 
@@ -100,9 +103,37 @@ async def get_next_shortner(client):
     if not shortners:
         return None
 
+    if index >= len(shortners):
+        index = 0
+
     s = shortners[index]
-    index = (index + 1) % len(shortners)
+    index += 1
+
     return s
+
+# ---------------- GPLinks SHORTNER ----------------
+async def generate_short_link(url, api, link):
+    api_url = f"{url}/api?api={api}&url={link}"
+
+    timeout = aiohttp.ClientTimeout(total=10)
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        try:
+            async with session.get(api_url) as resp:
+                try:
+                    # Try JSON
+                    data = await resp.json()
+                    if data.get("status") == "success":
+                        return data.get("shortenedUrl")
+                except:
+                    # Try TEXT
+                    text = await resp.text()
+                    if "http" in text:
+                        return text.strip()
+        except:
+            pass
+
+    return link  # fallback
 
 # ---------------- TEST ----------------
 @bot.on_message(filters.command("test"))
@@ -112,15 +143,7 @@ async def test(client, message):
     s = await get_next_shortner(client)
 
     if s:
-        api_url = f"{s['url']}/api?api={s['api']}&url={link.text}"
-
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.get(api_url) as resp:
-                    data = await resp.json()
-                    short = data.get("shortenedUrl", link.text)
-            except:
-                short = link.text
+        short = await generate_short_link(s["url"], s["api"], link.text)
     else:
         short = link.text
 
