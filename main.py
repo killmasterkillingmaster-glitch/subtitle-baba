@@ -24,9 +24,10 @@ from plugins.system_handlers import (
     add_fsub, receive_fsub_msg
 )
 
+# Render Server Webhook Setup
 app_flask = Flask(__name__)
 @app_flask.route('/')
-def home(): return "Bot Running Properly! 🚀"
+def home(): return "Bot Running Perfectly with MongoDB! 🚀"
 
 def run_flask(): app_flask.run(host='0.0.0.0', port=PORT)
 
@@ -38,7 +39,7 @@ def main():
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("setting", cmd_setting))
     
-    # Send & Confirm Logic
+    # Send & Confirm Logic (Using Regex to catch exact text commands)
     app.add_handler(CommandHandler("send", cmd_send))
     app.add_handler(MessageHandler(filters.Regex(r"(?i)^/send$"), cmd_send))
     app.add_handler(MessageHandler(filters.Regex(r"(?i)^/send more channel$"), cmd_send_more))
@@ -49,6 +50,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_push_callback, pattern=r"^p(single|multi)_"))
     app.add_handler(CallbackQueryHandler(handle_del_short, pattern=r"^delsh_"))
     
+    # Delete / Cancel Process
     app.add_handler(CommandHandler("delete", cmd_delete))
     app.add_handler(MessageHandler(filters.Regex(r"(?i)^/delete$"), cmd_delete))
 
