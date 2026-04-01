@@ -1,374 +1,242 @@
+import os
 import asyncio
 import aiohttp
 from aiohttp import web
-import string
-import random
+import base64
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import UserNotParticipant
-import config
-import database as db
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+from motor.motor_asyncio import AsyncIOMotorClient
 
-bot = Client(
-    "AnimeBot",
-    api_id=config.API_ID,
-    api_hash=config.API_HASH,
-    bot_token=config.BOT_TOKEN
-)
+# ================= RENDER VARIABLES =================
+# We fetch API details directly from Render Variables
+API_ID = int(os.environ.get("API_ID", 0))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
-# State Management Dictionary
+OWNER_ID = int(os.environ.get("OWNER_ID", 5351848105))
+STORAGE_CHANNEL = int(os.environ.get("STORAGE_CHANNEL", -1003096528862))
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb+srv://aasifhusenaasifkhan_db_user:64CtKuQjWL0EzYMO@botcluster.v4land1.mongodb.net/?retryWrites=true&w=majority")
+
+# ================= DATABASE SETUP =================
+client_db = AsyncIOMotorClient(MONGO_URI)
+db = client_db["AnimeBotDB"]
+shortener_db = db["shortener"]
+
+# ================= BOT INITIALIZE =================
+bot = Client("FileStoreBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+# User States Dictionary (RAM)
 user_states = {}
 
-# Web Server for Render (Keep Alive)
+# Web Server (For Render Port 10000)
 async def web_server():
     app = web.Application()
-    app.router.add_get('/', lambda r: web.Response(text="Bot is Running on Port 10000!"))
+    app.router.add_get('/', lambda r: web.Response(text="Bot is running successfully!"))
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', config.PORT)
+    site = web.TCPSite(runner, '0.0.0.0', 10000)
     await site.start()
 
-# --- Auth Check ---
-def is_auth(user_id):
-    return user_id in config.ALLOWED_USERS or user_id == config.OWNER_ID
+# ================= HELPER FUNCTIONS =================
+def encode_data(data: str):
+    # Data ko base64 format me encode karta hai (taaki link lambi aur professional lage)
+    return base64.urlsafe_b64encode(data.encode("ascii")).decode("ascii")
 
-# --- Shortener Logic ---
-async def get_shortlink(long_url):
-    shorteners = await db.get_all_shorteners()
-    if not shorteners:
-        return long_url
-    
-    # Randomly select a shortener (Auto Rotation)
-    shortener = random.choice(shorteners)
-    api_url = f"https://{shortener['name']}/api?api={shortener['api']}&url={long_url}"
-    
+def decode_data(data: str):
+    # Base64 link ko wapas text me badalta hai
+    try:
+        return base64.urlsafe_b64decode(data.encode("ascii")).decode("ascii")
+    except Exception:
+        return None
+
+async def get_shortlink(long_url, domain, api):
+    # Link ko Shortener site par bhejkar short link lata hai (with safety timeout)
+    api_url = f"https://{domain}/api?api={api}&url={long_url}"
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(api_url) as response:
-                res = await response.json()
-                if res.get("status") == "success":
-                    return res.get("shortenedUrl")
+            async with session.get(api_url, timeout=5) as response:
+                data = await response.json()
+                if data.get("status") == "success" or "shortenedUrl" in data:
+                    return data.get("shortenedUrl")
     except Exception as e:
-        pass
-    return long_url
+        print(f"Shortener Error: {e}")
+    return long_url # Agar error aaya toh direct link hi de dega (bot rukega nahi)
 
-# --- Admin Chat Tracking ---
-@bot.on_message(filters.group & filters.new_chat_members)
-async def track_admin_channels(client, message):
-    for member in message.new_chat_members:
-        if member.id == bot.me.id:
-            await db.admin_channels_db.update_one(
-                {"chat_id": message.chat.id}, 
-                {"$set": {"chat_name": message.chat.title}}, 
-                upsert=True
-            )
-
-# --- F-Sub System ---
-@bot.on_message(filters.command("Force sub") & filters.user(config.ALLOWED_USERS))
-async def force_sub_setup(client, message):
-    user_states[message.from_user.id] = {"state": "WAITING_FSUB"}
-    await message.reply("Please send message and check I'm admin gc")
-
-@bot.on_message(filters.forwarded & filters.user(config.ALLOWED_USERS))
-async def handle_forwards(client, message):
-    user_id = message.from_user.id
-    state_info = user_states.get(user_id)
-    
-    if state_info and state_info["state"] == "WAITING_FSUB":
-        chat_id = message.forward_from_chat.id
-        chat_name = message.forward_from_chat.title
-        try:
-            link = await client.export_chat_invite_link(chat_id)
-            await db.fsub_db.update_one({"chat_id": chat_id}, {"$set": {"name": chat_name, "link": link}}, upsert=True)
-            await message.reply("😘 adding successfully 😲")
-            del user_states[user_id]
-        except Exception as e:
-            await message.reply("Bot is not admin with invite link permission there!")
-
-# --- Post System ---
-@bot.on_message(filters.command("post") & filters.user(config.ALLOWED_USERS))
-async def post_cmd(client, message):
-    user_states[message.from_user.id] = {"state": "WAITING_POST_MEDIA"}
-    await message.reply("send post")
-
-@bot.on_message(filters.photo | filters.document)
-async def handle_media(client, message):
-    user_id = message.from_user.id
-    if user_id not in config.ALLOWED_USERS: return
-    
-    state_info = user_states.get(user_id)
-    if not state_info: return
-
-    if state_info["state"] == "WAITING_POST_MEDIA":
-        state_info["media"] = message.message_id
-        state_info["state"] = "WAITING_POST_TYPE"
-        await message.reply("post successfully received\nPlease provide single link or batch link (Reply: 'single link' or 'batch link')")
+async def send_files(client, message, user_id, data_str):
+    wait_msg = await message.reply_text("⏳ Processing your files... Please wait.")
+    try:
+        if "-" in data_str: # Batch Link Logic
+            start_msg, end_msg = map(int, data_str.split("-"))
+            for msg_id in range(start_msg, end_msg + 1):
+                try:
+                    await client.copy_message(user_id, STORAGE_CHANNEL, msg_id)
+                    await asyncio.sleep(0.5) # Telegram Ban se bachne ke liye 0.5s ka aaram
+                except Exception:
+                    pass # Agar koi bich ki file delete ho gayi ho toh error na de
+        else: # Single Link Logic
+            msg_id = int(data_str)
+            await client.copy_message(user_id, STORAGE_CHANNEL, msg_id)
         
-    elif state_info["state"] == "WAITING_SINGLE_EPISODE":
-        # Forward to storage channel
-        msg = await message.copy(config.STORAGE_CHANNEL)
-        state_info["file_id"] = msg.id
-        state_info["state"] = "WAITING_EP_NUMBER"
-        await message.reply("Enter Number")
+        await wait_msg.delete()
+    except Exception as e:
+        await wait_msg.edit_text("❌ Error: File not found or deleted from database.")
 
-    elif state_info["state"] == "WAITING_BATCH_EPISODE":
-        msg = await message.copy(config.STORAGE_CHANNEL)
-        if "first_file" not in state_info:
-            state_info["first_file"] = msg.id
-            await message.reply("send next episode (or type /done if finished)")
-        else:
-            state_info["last_file"] = msg.id
-            await message.reply("batch successfully adding\nSend next episode or type /done")
+# ================= MAIN COMMANDS =================
 
-@bot.on_message(filters.text & filters.user(config.ALLOWED_USERS))
-async def handle_text_states(client, message):
-    user_id = message.from_user.id
-    text = message.text
-    state_info = user_states.get(user_id)
-    
-    if not state_info: return
-
-    if state_info["state"] == "WAITING_POST_TYPE":
-        if text.lower() == "single link":
-            state_info["type"] = "single"
-            state_info["state"] = "WAITING_SINGLE_EPISODE"
-            await message.reply("send episode")
-        elif text.lower() == "batch link":
-            state_info["type"] = "batch"
-            state_info["state"] = "WAITING_BATCH_EPISODE"
-            await message.reply("send episode")
-            
-    elif state_info["state"] == "WAITING_EP_NUMBER":
-        state_info["ep_num"] = text
-        state_info["state"] = "WAITING_CONFIRM_1"
-        await message.reply("/confirm")
-
-    elif text == "/done" and state_info["state"] == "WAITING_BATCH_EPISODE":
-        state_info["state"] = "WAITING_BATCH_NUMBER"
-        await message.reply("Enter number (Example: 05 - 15)")
-
-    elif state_info["state"] == "WAITING_BATCH_NUMBER":
-        state_info["ep_num"] = text
-        state_info["state"] = "WAITING_CONFIRM_1"
-        await message.reply("/confirm")
-
-    elif text == "/confirm" and state_info["state"] == "WAITING_CONFIRM_1":
-        state_info["state"] = "WAITING_HMM"
-        # Dummy trigger to match your workflow
-        pass 
-
-    elif text == "/hmm" and state_info["state"] == "WAITING_HMM":
-        # Generate hash and save DB
-        hash_code = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
-        if state_info["type"] == "single":
-            data = {"type": "single", "msg_id": state_info["file_id"]}
-        else:
-            data = {"type": "batch", "start_id": state_info["first_file"], "end_id": state_info["last_file"]}
-            
-        await db.save_post_link(hash_code, data)
-        
-        bot_usr = await client.get_me()
-        bot_link = f"https://t.me/{bot_usr.username}?start={hash_code}"
-        
-        btn = InlineKeyboardMarkup([[InlineKeyboardButton(f"Watch episode {state_info['ep_num']}", url=bot_link)]])
-        
-        # Send post to admin for review
-        saved_msg = await client.copy_message(user_id, user_id, state_info["media"], reply_markup=btn)
-        
-        state_info["final_msg"] = saved_msg.id
-        state_info["state"] = "WAITING_SEND_CHOICE"
-        await message.reply("[ Send ]\n[ Send more channel ]")
-
-    elif text == "/send" and state_info["state"] == "WAITING_SEND_CHOICE":
-        channels = await db.admin_channels_db.find().to_list(length=100)
-        msg = "Select Channel:\n"
-        for i, ch in enumerate(channels):
-            msg += f"{i+1}. {ch['chat_name']} (/sel_{ch['chat_id']})\n"
-        state_info["state"] = "WAITING_CHANNEL_SELECT"
-        state_info["target"] = []
-        await message.reply(msg)
-
-    elif text == "/send more channel" and state_info["state"] == "WAITING_SEND_CHOICE":
-        channels = await db.admin_channels_db.find().to_list(length=100)
-        msg = "Select Channels (Click multiple):\n"
-        for i, ch in enumerate(channels):
-            msg += f"{i+1}. {ch['chat_name']} (/sel_{ch['chat_id']})\n"
-        msg += "\nType /done_sel when finished"
-        state_info["state"] = "WAITING_MULTI_CHANNEL"
-        state_info["target"] = []
-        await message.reply(msg)
-
-    elif text.startswith("/sel_"):
-        ch_id = int(text.split("_")[1])
-        state_info["target"].append(ch_id)
-        if state_info["state"] == "WAITING_CHANNEL_SELECT":
-            state_info["state"] = "WAITING_FINAL_CONFIRM"
-            await message.reply("confirm please\nType /confirm")
-        else:
-            await message.reply(f"Added. Select more or /done_sel")
-
-    elif text == "/done_sel" and state_info["state"] == "WAITING_MULTI_CHANNEL":
-        state_info["state"] = "WAITING_FINAL_CONFIRM"
-        await message.reply("confirm please\nType /confirm")
-
-    elif text == "/confirm" and state_info["state"] == "WAITING_FINAL_CONFIRM":
-        for ch in state_info["target"]:
-            await client.copy_message(ch, user_id, state_info["final_msg"])
-        await message.reply("Post Successfully Sent to Channels! 🎉")
-        del user_states[user_id]
-
-
-# --- User Start & Unlock System ---
 @bot.on_message(filters.command("start") & filters.private)
-async def start_cmd(client, message):
+async def start_cmd(client, message: Message):
     user_id = message.from_user.id
     text = message.text.split()
     
-    # Check if banned
-    if await db.banned_db.find_one({"user_id": user_id}):
-        return await message.reply("You are banned from using this bot.")
+    # 1. Start Menu (If no payload)
+    if len(text) == 1:
+        return await message.reply_text(
+            f"**Hello {message.from_user.first_name}!**\n\nI am an Advanced File Store Bot.\nI can store files and provide shareable links.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("About Dev", url="https://t.me/telegram")]])
+        )
 
-    if len(text) > 1:
-        param = text[1]
+    # 2. Extract Payload
+    payload = text[1]
+
+    # 3. Shortener Verification Process
+    if payload.startswith("verify_"):
+        real_payload = payload.replace("verify_", "")
+        real_data = decode_data(real_payload)
+        if not real_data:
+            return await message.reply_text("❌ Invalid Link!")
         
-        # 1. Verification Process (After Shortener)
-        if param.startswith("verify_"):
-            token = param.split("_")[1]
-            token_data = await db.tokens_db.find_one({"token": token, "user_id": user_id})
-            
-            if not token_data:
-                return await message.reply("Link Expired or Invalid!")
-            
-            # CHECK FORCE SUB HERE
-            fsubs = await db.get_fsub_channels()
-            not_joined = []
-            for ch in fsubs:
-                try:
-                    await client.get_chat_member(ch["chat_id"], user_id)
-                except UserNotParticipant:
-                    not_joined.append(ch)
-            
-            if not_joined:
-                btns = []
-                for ch in not_joined:
-                    btns.append([InlineKeyboardButton(f"Join {ch['name']}", url=ch['link'])])
-                btns.append([InlineKeyboardButton("Try Again", url=f"https://t.me/{(await client.get_me()).username}?start=verify_{token}")])
-                return await message.reply("Join first", reply_markup=InlineKeyboardMarkup(btns))
-            
-            # Send Episode
-            link_data = await db.get_post_link(token_data["hash"])
-            await db.tokens_db.delete_one({"token": token}) # Delete token after use
-            
-            if link_data["data"]["type"] == "single":
-                await client.copy_message(user_id, config.STORAGE_CHANNEL, link_data["data"]["msg_id"])
-            else:
-                for msg_id in range(link_data["data"]["start_id"], link_data["data"]["end_id"] + 1):
-                    await client.copy_message(user_id, config.STORAGE_CHANNEL, msg_id)
-            return
+        await send_files(client, message, user_id, real_data)
+        return
 
-        # 2. Main Link Click Process
-        hash_code = param
-        link_data = await db.get_post_link(hash_code)
-        if not link_data:
-            return await message.reply("Invalid Link!")
+    # 4. Main Request Process
+    real_data = decode_data(payload)
+    if not real_data:
+        return await message.reply_text("❌ Invalid Link!")
 
-        # Premium Bypass
-        if await db.is_premium(user_id):
-            if link_data["data"]["type"] == "single":
-                await client.copy_message(user_id, config.STORAGE_CHANNEL, link_data["data"]["msg_id"])
-            else:
-                for msg_id in range(link_data["data"]["start_id"], link_data["data"]["end_id"] + 1):
-                    await client.copy_message(user_id, config.STORAGE_CHANNEL, msg_id)
-            return
-        
-        # Non-Premium -> Give Shortener Link
-        token = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
-        await db.tokens_db.insert_one({"token": token, "user_id": user_id, "hash": hash_code})
-        
-        verify_link = f"https://t.me/{(await client.get_me()).username}?start=verify_{token}"
-        short_url = await get_shortlink(verify_link)
-        
-        btn = InlineKeyboardMarkup([[InlineKeyboardButton("Unlock Episode", url=short_url)]])
-        await message.reply("Please solve the link to get your episode!", reply_markup=btn)
-        
-    else:
-        await message.reply("Welcome to Anime Post Bot!")
+    # For Owner: Direct Access (No Shortener)
+    if user_id == OWNER_ID:
+        await send_files(client, message, user_id, real_data)
+        return
 
-# --- Shortener & Premium Admin Commands ---
-@bot.on_message(filters.command("add shortner account") & filters.user(config.ALLOWED_USERS))
-async def add_shortener_cmd(client, message):
-    user_states[message.from_user.id] = {"state": "WAITING_SHORT_URL"}
-    await message.reply("provide deskbord url (e.g. gplinks.in)")
-
-@bot.on_message(filters.command("remove shortner account") & filters.user(config.ALLOWED_USERS))
-async def remove_shortener_cmd(client, message):
-    shorts = await db.get_all_shorteners()
-    msg = "Select account:\n"
-    for s in shorts:
-        msg += f"- {s['name']} (/delshort_{s['name'].replace('.', '')})\n"
-    await message.reply(msg)
-
-@bot.on_message(filters.regex(r"/delshort_") & filters.user(config.ALLOWED_USERS))
-async def del_short_trigger(client, message):
-    user_states[message.from_user.id] = {"state": "WAITING_DELETE_CONFIRM", "target": message.text.split("_")[1]}
-    await message.reply("kya aap hatana chahte hai\nToh delete\nType /delete")
-
-@bot.on_message(filters.command("delete") & filters.user(config.ALLOWED_USERS))
-async def del_short_confirm(client, message):
-    state = user_states.get(message.from_user.id)
-    if state and state.get("state") == "WAITING_DELETE_CONFIRM":
-        await db.shorteners_db.delete_many({"name": {"$regex": state["target"]}})
-        await message.reply("successfully delete account for shortner")
-        del user_states[message.from_user.id]
-
-@bot.on_message(filters.command("add premium") & filters.user(config.ALLOWED_USERS))
-async def add_prem_cmd(client, message):
-    user_states[message.from_user.id] = {"state": "WAITING_PREM_ID"}
-    await message.reply("send I'd")
-
-@bot.on_message(filters.command("remove premium") & filters.user(config.ALLOWED_USERS))
-async def rem_prem_cmd(client, message):
-    user_states[message.from_user.id] = {"state": "WAITING_REM_PREM_ID"}
-    await message.reply("send I'd")
-
-@bot.on_message(filters.text & filters.user(config.ALLOWED_USERS), group=2)
-async def handle_misc_text(client, message):
-    user_id = message.from_user.id
-    text = message.text
-    state_info = user_states.get(user_id)
+    # For Normal Users: Check if shortener is active
+    short_info = await shortener_db.find_one({"_id": "current"})
     
-    if not state_info: return
+    if short_info:
+        # Create Verify Link and Shorten it
+        bot_uname = (await client.get_me()).username
+        verify_link = f"https://t.me/{bot_uname}?start=verify_{payload}"
+        
+        await message.reply_text("⏳ Generating secure link...")
+        short_link = await get_shortlink(verify_link, short_info["domain"], short_info["api"])
+        
+        btn = InlineKeyboardMarkup([[InlineKeyboardButton("Unlock Files 🔓", url=short_link)]])
+        await message.reply_text("⚠️ **You must unlock this link to get your files!**", reply_markup=btn)
+    else:
+        # If no shortener is added, give direct files
+        await send_files(client, message, user_id, real_data)
 
-    if state_info.get("state") == "WAITING_SHORT_URL":
-        state_info["short_url"] = text
-        state_info["state"] = "WAITING_SHORT_API"
-        await message.reply("successfully send Your API Token")
-        
-    elif state_info.get("state") == "WAITING_SHORT_API":
-        await db.add_shortener(state_info["short_url"], text)
-        await message.reply("successfully add 🤗🤗🤗")
-        del user_states[user_id]
-        
-    elif state_info.get("state") == "WAITING_PREM_ID":
-        state_info["prem_id"] = int(text)
-        state_info["state"] = "WAITING_HUHU"
-        await message.reply("successfully add member\nPlease confirm type /hu hu")
-        
-    elif state_info.get("state") == "WAITING_HUHU" and text == "/hu hu":
-        await db.add_premium(state_info["prem_id"])
-        await message.reply(f"successfully add member {state_info['prem_id']} 🪄🪄🪄")
-        del user_states[user_id]
-        
-    elif state_info.get("state") == "WAITING_REM_PREM_ID":
-        await db.ban_user(int(text))
-        await message.reply("successfully deleted and ban")
-        del user_states[user_id]
+# ================= ADMIN COMMANDS =================
 
+@bot.on_message(filters.command("genlink") & filters.user(OWNER_ID))
+async def genlink_cmd(client, message: Message):
+    user_states[message.from_user.id] = "WAIT_SINGLE"
+    await message.reply_text("📌 Please forward a message from your **Storage Channel** to generate a Single Link.\n\nType /cancel to cancel.")
 
+@bot.on_message(filters.command("batch") & filters.user(OWNER_ID))
+async def batch_cmd(client, message: Message):
+    user_states[message.from_user.id] = "WAIT_BATCH_1"
+    await message.reply_text("📌 Forward the **FIRST** message of the batch from your **Storage Channel**.\n\nType /cancel to cancel.")
+
+@bot.on_message(filters.command("shortener") & filters.user(OWNER_ID))
+async def shortener_cmd(client, message: Message):
+    user_states[message.from_user.id] = {"state": "WAIT_DOMAIN"}
+    await message.reply_text("📌 Send your Shortener Domain (Example: `gplinks.in` or `shrinkme.io`)\n\nType /cancel to abort.")
+
+@bot.on_message(filters.command("delshortener") & filters.user(OWNER_ID))
+async def delshortener_cmd(client, message: Message):
+    await shortener_db.delete_one({"_id": "current"})
+    await message.reply_text("✅ Shortener successfully removed! Direct links will now be given.")
+
+@bot.on_message(filters.command("cancel") & filters.private)
+async def cancel_cmd(client, message: Message):
+    user_id = message.from_user.id
+    if user_id in user_states:
+        del user_states[user_id]
+        await message.reply_text("✅ Process cancelled successfully.")
+    else:
+        await message.reply_text("You have no active process to cancel.")
+
+# ================= STATE HANDLERS (BUG FIX) =================
+# Group 1 ensures this text handler does not conflict with main commands
+
+@bot.on_message(filters.private & filters.text & filters.user(OWNER_ID), group=1)
+async def text_state_handler(client, message: Message):
+    user_id = message.from_user.id
+    state = user_states.get(user_id)
+    text = message.text
+
+    if not state or text.startswith("/"):
+        return # Ignore if no state or user typed a command
+
+    if isinstance(state, dict):
+        if state.get("state") == "WAIT_DOMAIN":
+            user_states[user_id] = {"state": "WAIT_API", "domain": text}
+            await message.reply_text(f"✅ Domain `{text}` Saved.\n\n📌 Now send your **API Token**:")
+        
+        elif state.get("state") == "WAIT_API":
+            domain = state["domain"]
+            api_token = text
+            await shortener_db.update_one({"_id": "current"}, {"$set": {"domain": domain, "api": api_token}}, upsert=True)
+            await message.reply_text(f"🎉 **Shortener Successfully Attached!**\n\nDomain: `{domain}`\nAll new requests will now use this shortener.")
+            del user_states[user_id]
+
+@bot.on_message(filters.forwarded & filters.private & filters.user(OWNER_ID), group=1)
+async def forward_state_handler(client, message: Message):
+    user_id = message.from_user.id
+    state = user_states.get(user_id)
+    
+    if not state:
+        return
+
+    if message.forward_from_chat and message.forward_from_chat.id == STORAGE_CHANNEL:
+        msg_id = message.forward_from_message_id
+        bot_uname = (await client.get_me()).username
+
+        if state == "WAIT_SINGLE":
+            code = encode_data(str(msg_id))
+            link = f"https://t.me/{bot_uname}?start={code}"
+            await message.reply_text(f"🔗 **Here is your Single Link:**\n\n{link}", disable_web_page_preview=True)
+            del user_states[user_id]
+
+        elif state == "WAIT_BATCH_1":
+            user_states[user_id] = {"state": "WAIT_BATCH_2", "start_id": msg_id}
+            await message.reply_text("✅ First message saved!\n\n📌 Now forward the **LAST** message of the batch.")
+
+        elif isinstance(state, dict) and state.get("state") == "WAIT_BATCH_2":
+            start_id = state["start_id"]
+            end_id = msg_id
+            
+            # Agar Admin ne galti se pichli file aage select kar di ho, to Bot use automatically seedha kar dega (Auto-Fix)
+            if start_id > end_id:
+                start_id, end_id = end_id, start_id 
+
+            code = encode_data(f"{start_id}-{end_id}")
+            link = f"https://t.me/{bot_uname}?start={code}"
+            await message.reply_text(f"🔗 **Here is your Batch Link:**\n\n{link}", disable_web_page_preview=True)
+            del user_states[user_id]
+    else:
+        await message.reply_text(f"❌ Error: Please forward the message **ONLY** from your specified Storage Channel.")
+
+# ================= RUNNER =================
 async def main():
+    if not API_ID or not BOT_TOKEN:
+        print("CRITICAL ERROR: API_ID or BOT_TOKEN is missing from Render Variables!")
+        return
     await bot.start()
-    print("Bot is started!")
-    await web_server() # Render Web server
+    print("=======================================")
+    print("BOT IS SUCCESSFULLY RUNNING!")
+    print("=======================================")
+    await web_server()
     from pyrogram import idle
     await idle()
 
