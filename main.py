@@ -18,7 +18,7 @@ API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DEST_CHANNEL = "@Sub_and_hardsub"   # yaha channel ka username dena. Id nahi dena.
-PORT = 10000      # ye change mat karna 
+PORT = int(os.environ.get("PORT", 10000))
 
 OWNER_ID = 5351848105       
 ALLOWED_USERS = [5344078567]             
