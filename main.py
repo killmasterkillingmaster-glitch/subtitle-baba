@@ -4,6 +4,8 @@ import json
 import asyncio
 import threading
 import tempfile
+import shutil
+import gc
 from collections import deque
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -12,17 +14,16 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ================= CONFIGURATION =================
 
-# Render Environment Variables se data lega. 
-API_ID = int(os.getenv("API_ID", "1234567")) # Yaha apna API ID daal sakte ho if Env me nahi hai
+API_ID = int(os.getenv("API_ID", "1234567")) 
 API_HASH = os.getenv("API_HASH", "your_api_hash_here")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "your_bot_token_here")
 
-DEST_CHANNEL = "@Sub_and_hardsub"   # yaha channel ka username dena.
-PORT = int(os.getenv("PORT", 10000)) # Render automatically PORT deta hai
+DEST_CHANNEL = "@Sub_and_hardsub"   
+PORT = int(os.getenv("PORT", 10000)) 
 
 OWNER_ID = 5351848105
 ALLOWED_USERS = [5344078567]
-ALLOWED_GROUPS = [-1003899919015]
+ALLOWED_GROUPS =[-1003899919015]
 
 app = Client("EncoderBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -33,7 +34,6 @@ in_queue = set()
 main_loop = None
 edit = "Maintanence by: @Sub_and_hardsub"
 
-# Tracks currently encoding process per user (for cancellation)
 current_encoding = {}
 
 # ================= UTILS =================
@@ -51,7 +51,7 @@ def is_owner(message: Message) -> bool:
 
 async def get_duration(file):
     try:
-        cmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", file]
+        cmd =["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", file]
         proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, _ = await proc.communicate()
         data = json.loads(stdout.decode())
@@ -72,48 +72,56 @@ async def safe_edit(message: Message, text: str):
     except Exception:
         pass
 
-async def download_with_verification(client, file_id, status_msg, phase="Downloading"):
+# FIX 1: Extension preserve karna aur Subtitle par ffprobe bypass karna
+async def download_with_verification(client, file_id, file_name, status_msg, is_video=True):
     temp_dir = tempfile.gettempdir()
+    ext = os.path.splitext(file_name)[1].lower()
+    if not ext and not is_video: ext = ".srt" # Default sub extension
+    
     base_name = f"temp_{int(time.time())}_{str(file_id)[:8]}"
 
     for attempt in range(3):  
-        temp_file = os.path.join(temp_dir, f"{base_name}_{attempt}")  
+        temp_file = os.path.join(temp_dir, f"{base_name}_{attempt}{ext}")  
         try:  
             if os.path.exists(temp_file):  
                 os.remove(temp_file)  
                   
             path = await client.download_media(file_id, file_name=temp_file)  
             if path and os.path.exists(path) and os.path.getsize(path) > 0:  
-                # Verify with ffprobe  
-                cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path]  
-                proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)  
-                stdout, stderr = await proc.communicate()  
-                if proc.returncode == 0:  
-                    return path  
-                else:  
-                    raise Exception("File corrupt")  
+                # Sirf video file ka verification karo, subtitle ka nahi
+                if is_video:
+                    cmd =["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path]  
+                    proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)  
+                    await proc.communicate()  
+                    if proc.returncode != 0:  
+                        raise Exception("Video File corrupt")  
+                return path  
         except Exception as e:  
             if attempt < 2:  
                 await asyncio.sleep(3)  
                 continue  
             raise Exception(f"Download failed: {str(e)}")  
-    raise Exception("Download failed after attempts")
+    raise Exception("Download failed after 3 attempts")
 
-def escape_subtitle_path(path):
-    """Linux aur FFmpeg ke special characters ko handle karega"""
-    return path.replace('\\', '/').replace(':', '\\:').replace("'", "'\\''")
 
 async def encode_with_progress(video_path, subtitle_path, output_path, total_duration, status_msg, user_id):
-    escaped_sub = escape_subtitle_path(subtitle_path)
+    # FIX 2: Path escaping se bachne ke liye subtitle ko current folder me safe name se copy karna
+    sub_ext = os.path.splitext(subtitle_path)[1].lower()
+    safe_sub_name = f"sub_{user_id}{sub_ext}"
+    safe_sub_path = os.path.join(os.getcwd(), safe_sub_name)
+    shutil.copy2(subtitle_path, safe_sub_path)
 
-    # Fast & Stable Render Setup (threads=2 for 512MB RAM)
-    cmd = [  
+    # FIX 3: Scale filter add kiya (odd resolution par x264 crash nahi hoga)
+    filter_complex = f"scale=trunc(iw/2)*2:trunc(ih/2)*2,subtitles='{safe_sub_name}'"
+
+    # Fast & Stable Render Setup (threads=1 for 512MB RAM absolute safety)
+    cmd =[  
         "ffmpeg", "-hide_banner", "-i", video_path,  
-        "-vf", f"subtitles='{escaped_sub}'",  
+        "-vf", filter_complex,  
         "-c:v", "libx264",  
         "-preset", "ultrafast",  
-        "-crf", "26", 
-        "-threads", "2", 
+        "-crf", "28", # Slightly higher CRF to save RAM and output size
+        "-threads", "1", # 1 thread ensures Render doesn't OOM kill the bot
         "-max_muxing_queue_size", "4096",
         "-c:a", "copy",  
         "-progress", "pipe:1",  
@@ -129,6 +137,7 @@ async def encode_with_progress(video_path, subtitle_path, output_path, total_dur
       
     last_update = 0  
     progress_data = {}  
+    error_lines =[]
 
     async def read_stdout():  
         nonlocal last_update  
@@ -139,9 +148,11 @@ async def encode_with_progress(video_path, subtitle_path, output_path, total_dur
             if "=" in line_str:  
                 key, val = line_str.split("=", 1)  
                 progress_data[key] = val  
-                if key == "out_time_ms":  
+                
+                # FIX 4: Prevent "N/A" crash
+                if key == "out_time_ms" and val != "N/A":  
                     try:  
-                        ms = int(progress_data.get("out_time_ms", 0))  
+                        ms = int(val)  
                         percent = ((ms / 1_000_000.0) / total_duration) * 100 if total_duration > 0 else 0  
                         now = time.time()  
                           
@@ -156,14 +167,21 @@ async def encode_with_progress(video_path, subtitle_path, output_path, total_dur
         while True:  
             line = await process.stderr.readline()  
             if not line: break  
+            error_lines.append(line.decode(errors="ignore"))
 
     await asyncio.gather(read_stdout(), read_stderr())  
 
     returncode = await process.wait()  
+    
+    # Cleanup safe subtitle
+    if os.path.exists(safe_sub_path):
+        os.remove(safe_sub_path)
+        
     current_encoding.pop(user_id, None)  
       
     if returncode != 0:  
-        raise Exception(f"FFmpeg failed with code {returncode}")  
+        err = "".join(error_lines[-10:])
+        raise Exception(f"FFmpeg failed with code {returncode}\n{err}")  
     if not os.path.exists(output_path) or os.path.getsize(output_path) < 1024:  
         raise Exception("Output file is missing or corrupted.")  
     return True
@@ -306,19 +324,21 @@ async def worker():
                 channel_log = await app.send_message(DEST_CHANNEL, f"<b>🔄 Encoding Started:</b> {v_info['file_name']}")  
 
             await safe_edit(status, "📥 Downloading Video... (Fast Mode)")  
-            v_path = await download_with_verification(app, v_info["file_id"], status)  
+            # Passed file_name and is_video=True
+            v_path = await download_with_verification(app, v_info["file_id"], v_info["file_name"], status, is_video=True)  
 
-            # Render 512MB Server limit check (Prevents sudden crash)
-            if os.path.getsize(v_path) > 700 * 1024 * 1024:  
-                await safe_edit(status, "❌ Video is larger than 700MB. My Server RAM cannot process this.")  
+            # Render 512MB RAM Limit ke hisaab se 600MB tak allow karte hai safe side ke liye
+            if os.path.getsize(v_path) > 600 * 1024 * 1024:  
+                await safe_edit(status, "❌ Video is larger than 600MB. Free server limit exceeded.")  
                 continue 
 
             await safe_edit(status, "📥 Downloading Subtitle...")  
-            s_path = await download_with_verification(app, s_info["file_id"], status)  
+            # Passed file_name and is_video=False (Isse sub pe ffprobe check bypass hoga)
+            s_path = await download_with_verification(app, s_info["file_id"], s_info["file_name"], status, is_video=False)  
 
             dur = await get_duration(v_path)  
             
-            # Use safe temporary output path to avoid naming crashes in linux
+            # Temporary output must have .mp4 extension
             out_path = os.path.join(tempfile.gettempdir(), f"out_{int(time.time())}.mp4")
 
             await safe_edit(status, "🔥 Encoding started...")  
@@ -328,7 +348,6 @@ async def worker():
                 await safe_edit(status, "📤 Uploading File...")  
                 upload_target = DEST_CHANNEL if DEST_CHANNEL else original_chat  
                   
-                # File upload via Pyrogram
                 await app.send_document(  
                     chat_id=upload_target,  
                     document=out_path,  
@@ -343,16 +362,15 @@ async def worker():
                 await safe_edit(status, "❌ Encoding Failed.")  
                   
         except Exception as e:  
-            await app.send_message(original_chat, f"❌ Error occurred: {str(e)}")  
+            await app.send_message(original_chat, f"❌ Error occurred: `{str(e)}`")  
         finally:  
             in_queue.discard(uid)  
-            # Delete temporary files to free space on Render
-            for f in [v_path, s_path, out_path]:  
+            # Force Memory cleanup
+            for f in[v_path, s_path, out_path]:  
                 if f and os.path.exists(f):  
-                    try:  
-                        os.remove(f)  
-                    except:  
-                        pass
+                    try: os.remove(f)  
+                    except: pass
+            gc.collect() # Har encode ke baad RAM free karna zaroori hai
 
 # ================= RENDER KEEP ALIVE =================
 
@@ -363,7 +381,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Bot is Running & Healthy!")
     def log_message(self, format, *args):
-        pass # Disables spammy http logs
+        pass
 
 def run_health_server():
     try:
@@ -381,7 +399,7 @@ async def main():
     global main_loop
     main_loop = asyncio.get_event_loop()
     await app.start()
-    print("Bot is Started & Fast Mode Active!")
+    print("Bot is Started & Fixed for Render!")
     asyncio.create_task(worker())
     await idle()
 
