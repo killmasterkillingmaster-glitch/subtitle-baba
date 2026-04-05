@@ -12,8 +12,7 @@ from pyrogram.errors import MessageNotModified, MessageIdInvalid
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PORT = 10000      # ye change mat karna
-
+PORT = int(os.getenv("PORT", 10000))  # ✅ ye line honi chahiye
 OWNER_ID = 5344078567
 ALLOWED_USERS = [5344078567]
 ALLOWED_GROUPS = [-1003810374456]
