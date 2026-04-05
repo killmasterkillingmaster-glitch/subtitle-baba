@@ -4,8 +4,8 @@ import json
 import asyncio
 import threading
 import tempfile
-import re
 import shutil
+import uuid
 from collections import deque
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -16,7 +16,6 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DEST_CHANNEL = "@Sub_and_hardsub"   # channel username
 PORT = 10000
 
 OWNER_ID = 5351848105
@@ -35,8 +34,8 @@ edit = "Maintanence by: @Sub_and_hardsub"     # DO NOT CHANGE
 
 current_encoding = {}  # user_id -> process
 
-MAX_VIDEO_MB = 200     # safe for 512 MB disk (input+output+temp)
-FFMPEG_THREADS = 2     # limit memory usage
+MAX_VIDEO_MB = 200     # safe for 512 MB disk
+FFMPEG_THREADS = 2     # memory safe
 FFMPEG_TIMEOUT = 1800  # 30 minutes
 
 # ================= UTILS =================
@@ -54,7 +53,6 @@ def is_owner(message: Message) -> bool:
     return message.from_user and message.from_user.id == OWNER_ID
 
 def enough_disk_space(required_mb=400) -> bool:
-    """Check if temp dir has at least required_mb free space."""
     try:
         total, used, free = shutil.disk_usage(tempfile.gettempdir())
         return free // (1024 * 1024) >= required_mb
@@ -86,15 +84,17 @@ async def safe_edit(message: Message, text: str):
 
 async def download_with_verification(client, file_id, status_msg, phase="Downloading"):
     temp_dir = tempfile.gettempdir()
-    base_name = f"temp_{int(time.time())}_{file_id.replace('/', '_')}"
+    safe_name = f"temp_{uuid.uuid4().hex}"
     for attempt in range(5):
-        temp_file = os.path.join(temp_dir, f"{base_name}_{attempt}")
+        temp_file = os.path.join(temp_dir, f"{safe_name}_{attempt}")
         try:
             if os.path.exists(temp_file):
                 os.remove(temp_file)
-            path = await client.download_media(file_id, file_name=temp_file)
+            path = await asyncio.wait_for(
+                client.download_media(file_id, file_name=temp_file),
+                timeout=300
+            )
             if path and os.path.exists(path) and os.path.getsize(path) > 0:
-                # verify with ffprobe
                 cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path]
                 proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
                 stdout, stderr = await proc.communicate()
@@ -203,7 +203,6 @@ async def cancel_task(client, message: Message):
         return
     user_id = message.from_user.id
 
-    # remove from queue if present
     removed = False
     for i, task in enumerate(task_queue):
         if task["user_id"] == user_id:
@@ -211,7 +210,6 @@ async def cancel_task(client, message: Message):
             removed = True
             break
 
-    # if currently encoding, terminate
     if user_id in current_encoding:
         proc = current_encoding[user_id]
         try:
@@ -306,7 +304,6 @@ async def add_to_queue(user_id, message):
 
 # ================= CORE ENCODER =================
 async def cleanup_old_temp_files():
-    """Remove leftover temp files from previous runs."""
     temp_dir = tempfile.gettempdir()
     for f in os.listdir(temp_dir):
         if f.startswith("temp_") and (f.endswith(".mp4") or f.endswith(".srt") or f.endswith(".ass")):
@@ -321,8 +318,7 @@ async def worker():
             await asyncio.sleep(5)
             continue
 
-        # Disk space check before processing next task
-        if not enough_disk_space(required_mb=MAX_VIDEO_MB * 2 + 100):  # input+output+margin
+        if not enough_disk_space(required_mb=MAX_VIDEO_MB * 2 + 100):
             await asyncio.sleep(30)
             continue
 
@@ -333,17 +329,12 @@ async def worker():
         original_chat = task["chat_id"]
 
         status = await app.send_message(original_chat, "⏳ Starting Process...")
-        channel_log = None
         v_path = s_path = out_path = None
 
         try:
-            if DEST_CHANNEL:
-                channel_log = await app.send_message(DEST_CHANNEL, f"<b>🔄 Starting:</b> {v_info['file_name']}")
-
             await safe_edit(status, "📥 Downloading video...")
             v_path = await download_with_verification(app, v_info["file_id"], status, "Downloading video")
 
-            # Double-check file size after download
             if os.path.getsize(v_path) > MAX_VIDEO_MB * 1024 * 1024:
                 await safe_edit(status, f"❌ Video too large (> {MAX_VIDEO_MB} MB).")
                 continue
@@ -358,15 +349,13 @@ async def worker():
 
             if success:
                 await safe_edit(status, "📤 Uploading...")
-                upload_target = DEST_CHANNEL if DEST_CHANNEL else original_chat
+                # Send directly to the group where command was issued
                 await app.send_document(
-                    chat_id=upload_target,
+                    chat_id=original_chat,
                     document=out_path,
                     caption=f"{out_path}"
                 )
-                await safe_edit(status, f"✅ Successfully Completed!\n\nFile sent to {DEST_CHANNEL}")
-                if channel_log:
-                    await channel_log.delete()
+                await safe_edit(status, "✅ Successfully Completed!\n\nFile sent to this group.")
             else:
                 await safe_edit(status, "❌ Encoding Failed.")
         except Exception as e:
@@ -400,7 +389,6 @@ async def main():
     main_loop = asyncio.get_event_loop()
     await app.start()
     print("Bot is started!")
-    # Clean up old temp files on startup
     await cleanup_old_temp_files()
     asyncio.create_task(worker())
     await idle()
