@@ -1,131 +1,220 @@
 import os
-import asyncio
-import tempfile
-import uuid
-import json
 import time
+import json
+import asyncio
+import threading
+import tempfile
+import re
 from collections import deque
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import MessageNotModified, MessageIdInvalid
-from aiohttp import web   # <-- naya import
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+# ================= CONFIGURATION =================
 
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PORT = int(os.getenv("PORT", 10000))  # ✅ ye line honi chahiye
-OWNER_ID = 5344078567
-ALLOWED_USERS = [5344078567]
-ALLOWED_GROUPS = [-1003810374456]
+DEST_CHANNEL = "@Sub_and_hardsub"   # yaha channel ka username dena. Id nahi dena.
+PORT = 10000      # ye change mat karna 
 
-app = Client("StreamingHardsubBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+OWNER_ID = 5351848105       
+ALLOWED_USERS = [5344078567]             
+ALLOWED_GROUPS = [-1003899919015] 
 
-# ------------------------- Data -------------------------
+app = Client("EncoderBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+# Global Variables
 users_data = {}
 task_queue = deque()
 in_queue = set()
-current_encoding = {}
+processing_lock = asyncio.Lock()
+main_loop = None
+edit = "Maintanence by: @Sub_and_hardsub"     # ye change mat karna warna bot start nahi hoga. yaha value hoga "Maintanence by: @Sub_and_hardsub"
 
-MAX_VIDEO_MB = 1024
-FFMPEG_THREADS = 2
 
-# ------------------------- Utils -------------------------
-def is_authorized(msg: Message):
-    if not msg.from_user:
-        return False
-    u_id = msg.from_user.id
-    if u_id == OWNER_ID or u_id in ALLOWED_USERS or msg.chat.id in ALLOWED_GROUPS:
+# Tracks currently encoding process per user (for cancellation)
+current_encoding = {}  # user_id -> asyncio.subprocess.Process
+
+# ================= UTILS =================
+
+def is_authorized(message: Message) -> bool:
+    """Check if user is allowed (owner, allowed list, or group)."""
+    if not message.from_user: return False
+    u_id = message.from_user.id    
+    if message.text and message.text.lower().startswith("/start"): return True    
+    if u_id == OWNER_ID or u_id in ALLOWED_USERS or message.chat.id in ALLOWED_GROUPS:
         return True
     return False
 
-def is_owner(msg: Message):
-    return msg.from_user and msg.from_user.id == OWNER_ID
+def is_owner(message: Message) -> bool:
+    """Check if user is the bot owner."""
+    return message.from_user and message.from_user.id == OWNER_ID
+
+async def get_duration(file):
+    try:
+        cmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", file]
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, _ = await proc.communicate()
+        data = json.loads(stdout.decode())
+        return float(data.get("format", {}).get("duration", 0))
+    except:
+        return 0
 
 def format_progress_bar(percent, width=10):
     filled = int(percent * width / 100)
     bar = "█" * filled + "░" * (width - filled)
     return bar
 
-async def safe_edit(msg, text):
+async def safe_edit(message: Message, text: str):
     try:
-        await msg.edit(text)
+        await message.edit(text)
     except (MessageNotModified, MessageIdInvalid):
         pass
-    except:
+    except Exception:
         pass
 
-async def download_temp(client, file_id):
+async def download_with_verification(client, file_id, status_msg, phase="Downloading"):
+    """Download with verification and retries (no progress bar)."""
     temp_dir = tempfile.gettempdir()
-    temp_name = f"{uuid.uuid4().hex}"
-    path = await client.download_media(file_id, file_name=os.path.join(temp_dir, temp_name))
-    return path
+    base_name = f"temp_{int(time.time())}_{file_id}"
+    
+    for attempt in range(5):
+        temp_file = os.path.join(temp_dir, f"{base_name}_{attempt}")
+        try:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+                
+            path = await client.download_media(file_id, file_name=temp_file)
+            if path and os.path.exists(path) and os.path.getsize(path) > 0:
+                # Verify with ffprobe
+                cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path]
+                proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                stdout, stderr = await proc.communicate()
+                if proc.returncode == 0:
+                    return path
+                else:
+                    raise Exception("File corrupt")
+        except Exception as e:
+            if attempt < 4:
+                await asyncio.sleep(5 * (attempt + 1))
+                continue
+            raise Exception(f"Download failed after {attempt+1} attempts: {str(e)}")
+    raise Exception("Download failed after 5 attempts")
 
-# ------------------------- Encoding (incomplete but as per your code) -------------------------
-async def encode_and_upload(video_path, subtitle_path, chat_id, duration, status_msg, user_id):
-    escaped_sub = subtitle_path.replace("\\", "\\\\").replace("'", "'\\''")
+async def encode_with_progress(video_path, subtitle_path, output_path, total_duration, status_msg, user_id):
+    """Run FFmpeg and update progress from -progress output."""
+    # Escape subtitle path for FFmpeg filter
+    escaped_sub = subtitle_path.replace("\\", "\\\\").replace("'", "'\\\\''")
+    
+    # [1] FFMPEG SETTINGS UPDATED FOR SPEED AND STABLE SIZE
     cmd = [
         "ffmpeg", "-i", video_path,
-        "-vf", f"subtitles='{escaped_sub}'",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-        "-threads", str(FFMPEG_THREADS),
-        "-movflags", "frag_keyframe+empty_moov",
-        "-f", "mp4",
-        "pipe:1"
+        "-vf", f"subtitles=filename='{escaped_sub}'",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-crf", "24",
+        "-threads", "0",
+        "-max_muxing_queue_size", "1024",
+        "-c:a", "copy",
+        "-progress", "pipe:1",
+        "-y", output_path
     ]
+    
     process = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
+    # Store process for potential cancellation
     current_encoding[user_id] = process
-    # ... (aapka baaki incomplete logic, hum use waise hi rakh rahe hain)
+    
+    last_update = 0
+    progress_data = {}
+    error_lines = []
+
+    async def read_stdout():
+        nonlocal last_update
+        while True:
+            line = await process.stdout.readline()
+            if not line:
+                break
+            line_str = line.decode(errors="ignore").strip()
+            if "=" in line_str:
+                key, val = line_str.split("=", 1)
+                progress_data[key] = val
+            if key == "out_time_ms":
+                try:
+                    ms = int(progress_data.get("out_time_ms", 0))
+                    current_seconds = ms / 1_000_000.0
+                    percent = (current_seconds / total_duration) * 100 if total_duration > 0 else 0
+                    now = time.time()
+                    
+                    # [4] PROGRESS UPDATE CHANGED FROM 7 TO 5 SECONDS
+                    if now - last_update > 5 or percent >= 100:
+                        bar = format_progress_bar(percent)
+                        await safe_edit(status_msg, f"🔥 Encoding...\n`{bar}` {percent:.1f}%")
+                        last_update = now
+                except Exception:
+                    pass
+
+    async def read_stderr():
+        nonlocal error_lines
+        while True:
+            line = await process.stderr.readline()
+            if not line:
+                break
+            line_str = line.decode(errors="ignore")
+            error_lines.append(line_str)
+
+    await asyncio.gather(read_stdout(), read_stderr())
+
+    returncode = await process.wait()
+    # Remove from tracking
+    current_encoding.pop(user_id, None)
+    
+    if returncode != 0:
+        error_text = "".join(error_lines[-20:])
+        raise Exception(f"FFmpeg failed with code {returncode}\n{error_text}")
+    if not os.path.exists(output_path) or os.path.getsize(output_path) < 1024:
+        raise Exception("Output file missing or too small")
     return True
 
-# ------------------------- Health Server for Render -------------------------
-async def health_check(request):
-    return web.Response(text="Bot is running", status=200)
+# ================= HANDLERS =================
 
-async def run_health_server():
-    web_app = web.Application()
-    web_app.router.add_get("/", health_check)
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    print(f"🌐 Health server listening on port {PORT}")
-
-# ------------------------- Handlers (same as your code) -------------------------
 @app.on_message(filters.command("start"))
-async def start_cmd(client, message: Message):
-    await message.reply("<b>🔥 Streaming Hardsub Bot Online!</b>\n\n"
-                        "Use /hsub on a video file, then send subtitle.\n"
-                        "Use /cancel to stop your current task.\n"
-                        "Use /delete to clear all tasks (owner only).")
+async def start(client, message: Message):
+    await message.reply(f"<b>🔥 Hardsub bot is Online again!</b>\n\nUse /hsub to add subtitle into video\nUse /cancel to stop your current task\nUse /delete to clear all tasks (owner only)\n\n{edit}")
 
 @app.on_message(filters.command("delete"))
 async def delete_all(client, message: Message):
+    """Only owner can clear all queues and data."""
     if not is_owner(message):
-        await message.reply("❌ Only owner can use this.")
+        await message.reply("❌ Only the bot owner can use this command.")
         return
     global task_queue, in_queue, users_data
     task_queue.clear()
     in_queue.clear()
     users_data.clear()
-    await message.reply("🗑️ All tasks cleared.")
+    await message.reply("🗑️ All data cleared.")
 
 @app.on_message(filters.command("cancel"))
 async def cancel_task(client, message: Message):
+    """Cancel the user's own queued or running task."""
     if not is_authorized(message):
         return
     user_id = message.from_user.id
-
+    
+    # Check if user has a task in queue
     removed = False
     for i, task in enumerate(task_queue):
         if task["user_id"] == user_id:
             del task_queue[i]
             removed = True
             break
-
+    
+    # If task is currently encoding, terminate the process
     if user_id in current_encoding:
         proc = current_encoding[user_id]
         try:
@@ -134,10 +223,9 @@ async def cancel_task(client, message: Message):
         except:
             proc.kill()
         current_encoding.pop(user_id, None)
-        in_queue.discard(user_id)
         await message.reply("🛑 Your encoding task has been cancelled.")
         return
-
+    
     if removed:
         in_queue.discard(user_id)
         await message.reply("✅ Your task has been removed from the queue.")
@@ -146,16 +234,12 @@ async def cancel_task(client, message: Message):
 
 @app.on_message(filters.command("hsub"))
 async def hsub_cmd(client, message: Message):
-    if not is_authorized(message):
-        return
+    if not is_authorized(message): return
     replied = message.reply_to_message
     if not replied or not (replied.video or replied.document):
         return await message.reply("❌ Reply to a video file with /hsub")
-
+    
     media = replied.video or replied.document
-    if media.file_size > MAX_VIDEO_MB * 1024 * 1024:
-        return await message.reply(f"❌ Video exceeds {MAX_VIDEO_MB} MB limit.")
-
     users_data[message.from_user.id] = {
         "video": {"file_id": media.file_id, "file_name": media.file_name or "video.mp4"},
         "chat_id": message.chat.id,
@@ -165,17 +249,18 @@ async def hsub_cmd(client, message: Message):
 
 @app.on_message(filters.document | filters.video | filters.text)
 async def handle_all_inputs(client, message: Message):
-    if not is_authorized(message):
-        return
+    if not is_authorized(message): return
     user_id = message.from_user.id
-    if user_id not in users_data:
-        return
+    
+    if user_id not in users_data: return
+
     state = users_data[user_id].get("state")
 
     if state == "WAIT_SUB" and message.document:
         if message.document.file_name.lower().endswith((".srt", ".ass")):
             users_data[user_id]["subtitle"] = {"file_id": message.document.file_id, "file_name": message.document.file_name}
             users_data[user_id]["state"] = "WAIT_RENAME_CHOICE"
+            
             btn = InlineKeyboardMarkup([[
                 InlineKeyboardButton("Rename", callback_data="rn_yes"),
                 InlineKeyboardButton("Skip", callback_data="rn_skip")
@@ -218,59 +303,98 @@ async def add_to_queue(user_id, message):
     in_queue.add(user_id)
     await message.reply(f"✅ Added to Queue. Position: {len(task_queue)}")
 
-# ------------------------- Worker -------------------------
+# ================= CORE ENCODER =================
+
 async def worker():
     while True:
         if not task_queue:
-            await asyncio.sleep(3)
+            await asyncio.sleep(5)
             continue
+        
         task = task_queue.popleft()
         uid = task["user_id"]
-        if uid in in_queue:
-            continue
-        in_queue.add(uid)
-
         v_info = task["video"]
         s_info = task["subtitle"]
-        chat_id = task["chat_id"]
-
-        status_msg = await app.send_message(chat_id, "⏳ Preparing files...")
-        v_path = s_path = None
+        original_chat = task["chat_id"]
+        
+        status = await app.send_message(original_chat, "⏳ Starting Process...")
+        channel_log = None
+        v_path = s_path = out_path = None
+        
         try:
-            await safe_edit(status_msg, "📥 Downloading video...")
-            v_path = await download_temp(app, v_info["file_id"])
+            if DEST_CHANNEL:
+                channel_log = await app.send_message(DEST_CHANNEL, f"<b>🔄 Starting:</b> {v_info['file_name']}")
 
-            await safe_edit(status_msg, "📥 Downloading subtitle...")
-            s_path = await download_temp(app, s_info["file_id"])
+            await safe_edit(status, "📥 Downloading video...")
+            v_path = await download_with_verification(app, v_info["file_id"], status, "Downloading video")
 
-            # Get duration
-            cmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", v_path]
-            proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE)
-            out, _ = await proc.communicate()
-            dur = float(json.loads(out.decode())["format"]["duration"])
+            # [3] SERVER SAFETY CHECK (500 MB)
+            if os.path.getsize(v_path) > 500 * 1024 * 1024:
+                await safe_edit(status, "❌ Video too large for server.")
+                continue  # Using 'continue' instead of 'return' to keep the queue running.
 
-            await safe_edit(status_msg, "🔥 Encoding & Uploading...")
-            # Call the encode function (placeholder for now)
-            # await encode_and_upload(...)
-            await safe_edit(status_msg, "✅ Hardsub Completed!")
+            await safe_edit(status, "📥 Downloading subtitle...")
+            s_path = await download_with_verification(app, s_info["file_id"], status, "Downloading subtitle")
+
+            dur = await get_duration(v_path)
+            out_path = v_info["file_name"]
+            await safe_edit(status, "🔥 Encoding...")
+            success = await encode_with_progress(v_path, s_path, out_path, dur, status, uid)
+
+            if success:
+                await safe_edit(status, "📤 Uploading...")
+                upload_target = DEST_CHANNEL if DEST_CHANNEL else original_chat
+                
+                # [2] SEND AS DOCUMENT FORMAT INSTEAD OF VIDEO
+                await app.send_document(
+                    chat_id=upload_target,
+                    document=out_path,
+                    caption=f"{out_path}"
+                )
+                
+                await safe_edit(status, f"✅ Successfully Completed!\n\nFile sent to {DEST_CHANNEL}")
+                if channel_log:
+                    await channel_log.delete()
+            else:
+                await safe_edit(status, "❌ Encoding Failed.")
+                
         except Exception as e:
-            await app.send_message(chat_id, f"❌ Error: {str(e)}")
+            await app.send_message(original_chat, f"❌ Error: {str(e)}")
         finally:
             in_queue.discard(uid)
-            for f in [v_path, s_path]:
+            for f in [v_path, s_path, out_path]:
                 if f and os.path.exists(f):
                     try:
                         os.remove(f)
                     except:
                         pass
 
-# ------------------------- Main (modified) -------------------------
+# ================= RENDER KEEP ALIVE =================
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is Running")
+
+def run_health_server():
+    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    server.serve_forever()
+
+# ================= MAIN =================
+
 async def main():
+    if edit != "Maintanence by: @Sub_and_hardsub":
+        print("credit hataya isiliye nahi chala. Sahi karo wo pehele. Waha value hoga 'Maintanence by: @Sub_and_hardsub'")
+        return
+    global main_loop
+    main_loop = asyncio.get_event_loop()
     await app.start()
+    print("Bot is started!")
     asyncio.create_task(worker())
-    asyncio.create_task(run_health_server())   # <-- health server start
-    print("Bot Started (Streaming Mode + Health Server)")
     await idle()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    threading.Thread(target=run_health_server, daemon=True).start()
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
